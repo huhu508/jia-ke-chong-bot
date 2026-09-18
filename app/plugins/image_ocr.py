@@ -178,6 +178,17 @@ async def handle_image(bot: Bot, event: MessageEvent):
         return
     logger.info(f"[图片识别] qq={qq}\nOCR 原文:\n{text}\n解析结果: {data}")
 
+    # 页面类型分析：统计/列表页（月汇总、活动列表等）展示的是多条运动的聚合，
+    # 不是单次运动详情，不应作为一次运动回显/落库。先分析再确认，避免误读。
+    page_kind = parsers.detect_page_kind(text)
+    if page_kind == "summary":
+        logger.info(f"[图片识别] qq={qq} 识别为统计/列表页，拒绝记录")
+        await image_matcher.finish(
+            "🔍 我识别出这是一张「统计/列表」页（多条运动的汇总），不是单次运动详情，所以先不记录。\n"
+            "· 若要记录某一次运动：点开那条记录，发**单次运动详情页**截图（含这一次的距离/时长/配速）；\n"
+            "· 若要查自己的周/月汇总：直接发「周数据」「月数据」，我会按平台接口自动统计。"
+        )
+
     if not any(
         k in data
         for k in (

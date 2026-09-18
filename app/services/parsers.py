@@ -335,6 +335,24 @@ def _value_near(items, anchor, extractor):
     return best
 
 
+def _has_unit_token(text: str, units) -> bool:
+    """判断框文本是否以「数字+单位」形式包含某个单位（整词匹配）。
+
+    按单位长度降序匹配，并在单位后加「不得紧跟字母/汉字」的边界，避免：
+      - 爬升单位「m」误匹配「km」（``"m" in "km"`` 为真的子串陷阱）；
+      - 爬升单位「米」误匹配「千米 / 公里」。
+    只在合并框（数字与单位同框）定位时使用；独立单位框走精确匹配，不受影响。
+    """
+    for u in sorted(units, key=len, reverse=True):
+        if re.search(
+            r"\d[\d,]*(?:\.\d+)?\s*" + re.escape(u) + r"(?![A-Za-z一-鿿])",
+            text,
+            re.IGNORECASE,
+        ):
+            return True
+    return False
+
+
 def _extract_field(items, spec):
     extractor = _make_extractor(spec)
     labels = spec["labels"]
@@ -358,7 +376,7 @@ def _extract_field(items, spec):
     # 3) 合并框（数字与单位同框，如「7.35KM」「603KCAL」）
     for it in items:
         t = it["text"].strip()
-        if t[:1].isdigit() and any(u in t.lower() for u in units):
+        if t[:1].isdigit() and _has_unit_token(t, units):
             v = extractor(t)
             if v is not None:
                 return v
@@ -380,3 +398,56 @@ def parse_activity_from_boxes(result) -> dict:
             except (ValueError, TypeError):
                 continue
     return data
+
+
+# ---------------------------------------------------------------------------
+# 页面类型识别：区分「单次运动详情」与「统计/列表」页
+# ---------------------------------------------------------------------------
+
+# 统计/列表页的标题或入口关键词
+_SUMMARY_TITLE_KEYWORDS = (
+    "统计",
+    "筛选",
+    "历史记录",
+    "运动记录",
+    "活动记录",
+    "月报",
+    "周报",
+    "年报",
+    "数据总览",
+)
+
+
+def detect_page_kind(text: str) -> str:
+    """判断截图是「单次运动详情」还是「统计/列表」页。
+
+    统计/列表页（月汇总、活动列表、历史记录等）展示的是**多条**运动的聚合，
+    不适合作为「一次运动」写入，返回 ``"summary"``；否则返回 ``"activity"``。
+
+    采用打分制（阈值 3），基于 OCR 纯文本的强信号，避免误伤单条详情：
+      1. 标题/入口关键词（统计、筛选、历史记录…）—— 每条 3 分；
+      2. 汇总计数「N 次运动 / 训练 / 锻炼」—— 3 分；
+      3. 多条活动条目（≥2 个「星期X/周X」或 ≥3 个 km 距离值）—— 各 2 分；
+      4. 年月头（如「2026年9月」）—— 弱信号 1 分。
+    """
+    t = (text or "").strip()
+    if not t:
+        return "activity"
+
+    score = 0
+    # 1) 标题/入口关键词
+    if any(kw in t for kw in _SUMMARY_TITLE_KEYWORDS):
+        score += 3
+    # 2) 汇总计数：N 次运动 / N 次训练 / N 次锻炼
+    if re.search(r"\d+\s*次\s*(?:运动|训练|锻炼)", t):
+        score += 3
+    # 3) 多条活动条目
+    if len(re.findall(r"星期[一二三四五六日天]|周[一二三四五六日天]", t)) >= 2:
+        score += 2
+    if len(re.findall(r"\d+(?:\.\d+)?\s*km\b", t, re.IGNORECASE)) >= 3:
+        score += 2
+    # 4) 年月头（弱信号）
+    if re.search(r"\d{4}\s*年\s*\d{1,2}\s*月", t):
+        score += 1
+
+    return "summary" if score >= 3 else "activity"

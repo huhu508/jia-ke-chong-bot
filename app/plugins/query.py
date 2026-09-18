@@ -19,8 +19,13 @@ query_cmd = on_command("今日", aliases={"步数", "今日运动", "运动"}, p
 
 def _format_stats(s: DailyStats) -> str:
     # 顺序参考主流运动 App「用户最关心」：距离 / 配速 / 爬升 / 时长 / 消耗 / 心率 / 负荷。
-    # 静息心率已移除；值 >0 才显示，避免刷屏 0 值。
-    lines = [f"📅 {s.date}", f"👟 步数：{s.steps}", f"📏 距离：{s.distance_km} km"]
+    # 静息心率已移除；值 >0 才显示，避免刷屏 0 值。步数也不再无条件展示——
+    # COROS 等跑步场景步数无意义（群里反馈「为什么一定要说步数」），有值才显示。
+    lines = [f"📅 {s.date}"]
+    if s.steps:
+        lines.append(f"👟 步数：{s.steps}")
+    if s.distance_km:
+        lines.append(f"📏 距离：{s.distance_km} km")
     if s.avg_pace_sec_per_km:
         lines.append(f"🏃 平均配速：{format_pace(s.avg_pace_sec_per_km)} /km")
     if s.ascent_meters:
@@ -37,6 +42,8 @@ def _format_stats(s: DailyStats) -> str:
         lines.append(f"🏆 单次最长：{s.max_activity_distance_km} km")
     if s.sleep_hours:
         lines.append(f"😴 睡眠：{s.sleep_hours} 小时")
+    if len(lines) == 1:
+        lines.append("今日暂无运动记录")
     return "\n".join(lines)
 
 

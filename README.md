@@ -33,6 +33,7 @@ NoneBot2 + OneBot v11（NapCat）· SQLAlchemy + SQLite · RapidOCR（本地识�
     │   ├── sync.py         # 平台拉取 + 截图写入 + 历史回填
     │   ├── ranking.py      # 日/周/月三榜聚合与格式化
     │   ├── summary.py      # 个人周期汇总
+    │   ├── diagnose.py     # 训练诊断：负荷/恢复/配速趋势 + 比赛成绩算 VO₂max
     │   ├── aggregator.py   # 日明细 → 周汇总（幂等）
     │   ├── retention.py    # 原始明细保留 45 天后清理
     │   ├── ocr.py          # RapidOCR 本地识别（数据不出本机）
@@ -42,7 +43,7 @@ NoneBot2 + OneBot v11（NapCat）· SQLAlchemy + SQLite · RapidOCR（本地识�
     │   ├── member.py       # get_or_create_member
     │   └── credentials.py  # 每用户凭据 / token 存储
     └── plugins/            # NoneBot 插件：admin / group_tracker / image_ocr /
-                            #   interact / lottery / query / ranking / summary
+                            #   interact / lottery / query / ranking / summary / diagnose
 ```
 
 ## 快速开始（本地）
@@ -108,6 +109,7 @@ NapCat 负责登录 QQ 并通过反向 WebSocket 把消息推给机器人：
 | `总结`（可加 `月`） | AI 把本周 / 本月数据说成人话 |
 | `鼓励我` | AI 按你的数据来一句鼓励 |
 | `建议`（可加 `月`） | AI 按你的周 / 月数据给训练建议 |
+| `诊断`（可加 `5k 25:00`） | 训练负荷 / 恢复 / 配速趋势诊断；附比赛成绩解锁 VO₂max / 成绩预测 |
 | `排行` / `周榜` / `月榜` | 查看今日 / 本周 / 本月运动三榜 |
 | `绑定 garmin` / `绑定 coros` | 绑定运动平台（每人独立账号） |
 | `garmin绑定 邮箱 密码` | **私聊**中绑定佳明（密码不出现在群里） |

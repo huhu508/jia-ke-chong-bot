@@ -102,13 +102,13 @@ async def handle_bind(bot: Bot, event: MessageEvent, args: Message = CommandArg(
         except Exception as e:
             logger.warning(f"私聊发送授权链接异常（可能已发出）: {e}")
         await bind_cmd.finish(
-            "已私聊你授权链接，请查收完成授权后回群里发「绑定确认」；"
-            "若没收到私聊，请先添加我为好友再发一次「绑定 coros」"
+            "已私聊你授权链接，请查收并完成授权后回群里发「绑定确认」；"
+            "若没收到私聊，请先添加我为好友，再发一次「绑定 coros」（机器人私聊需互为好友）"
         )
 
-    # Garmin：无 OAuth，引导私聊发邮箱密码
+    # Garmin：无 OAuth，引导私聊发邮箱密码（私聊需先互为好友，否则消息到不了机器人）
     await bind_cmd.finish(
-        "佳明没有第三方授权接口，请**私聊**我发送：\n"
+        "佳明没有第三方授权接口，请**先添加我为好友**，再**私聊**我发送：\n"
         "「garmin绑定 邮箱 密码」\n"
         "例如：garmin绑定 abc@example.com MyPass123（邮箱和密码之间用一个空格隔开）\n"
         "我会按你的 QQ 私密保存并登录拉数，密码不会出现在群里。"
@@ -118,7 +118,9 @@ async def handle_bind(bot: Bot, event: MessageEvent, args: Message = CommandArg(
 @garmin_bind_cmd.handle()
 async def handle_garmin_bind(bot: Bot, event: MessageEvent, args: Message = CommandArg()):
     if not isinstance(event, PrivateMessageEvent):
-        await garmin_bind_cmd.finish("请不要在群里发密码，请私聊我「garmin绑定 邮箱 密码」")
+        await garmin_bind_cmd.finish(
+            "请不要在群里发密码，请**先添加我为好友**，再私聊我「garmin绑定 邮箱 密码」"
+        )
 
     parts = args.extract_plain_text().strip().split(None, 1)
     if len(parts) != 2:
