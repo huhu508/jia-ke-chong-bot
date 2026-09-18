@@ -1,0 +1,105 @@
+"""运动排行：把 daily_record 按时间范围聚合成三榜（日榜/周榜/月榜共用）。
+
+三榜口径：
+  - 运动距离榜：范围内所有记录的距离之和；
+  - 爬升榜：范围内所有记录的爬升之和；
+  - 单次运动距离榜：范围内单条记录的最大距离。
+
+未绑定平台、靠截图记录（platform="manual"）的成员也纳入统计。
+"""
+
+from collections import defaultdict
+from datetime import date
+
+from sqlalchemy import select
+from sqlalchemy.orm import Session
+
+from ..db import get_session
+from ..models.daily_record import DailyRecord
+from ..models.member import Member
+
+_TOP_N = 10
+_MEDALS = ["🥇", "🥈", "🥉"]
+
+
+def compute_range_rankings(
+    start: date, end: date, session: Session | None = None, top_n: int = _TOP_N
+) -> dict:
+    """聚合 [start, end) 区间的 daily_record，返回三榜。
+
+    形如 {distance: [(昵称, 值), ...], ascent: [...], max_single: [...]}。
+    """
+    own_session = session is None
+    if own_session:
+        session = get_session()
+    try:
+        rows = session.execute(
+            select(DailyRecord, Member.nickname)
+            .join(Member, DailyRecord.member_qq == Member.qq, isouter=True)
+            .where(DailyRecord.record_date >= start, DailyRecord.record_date < end)
+        ).all()
+
+        distance = defaultdict(float)
+        ascent = defaultdict(float)
+        max_single = defaultdict(float)
+        nicknames: dict[str, str] = {}
+
+        for rec, nick in rows:
+            qq = rec.member_qq
+            nicknames.setdefault(qq, nick or qq)
+            distance[qq] += rec.distance_km or 0.0
+            ascent[qq] += rec.ascent_meters or 0.0
+            max_single[qq] = max(max_single[qq], rec.max_activity_distance_km or 0.0)
+
+        def _rank(agg: dict) -> list[tuple[str, float]]:
+            return [
+                (nicknames[qq], round(v, 2))
+                for qq, v in sorted(
+                    ((q, val) for q, val in agg.items() if val > 0),
+                    key=lambda kv: kv[1],
+                    reverse=True,
+                )[:top_n]
+            ]
+
+        return {
+            "distance": _rank(distance),
+            "ascent": _rank(ascent),
+            "max_single": _rank(max_single),
+        }
+    finally:
+        if own_session:
+            session.close()
+
+
+def _fmt_rank(items: list[tuple[str, float]], unit: str, fmt: str) -> str:
+    if not items:
+        return "（暂无数据）"
+    lines = []
+    for i, (name, val) in enumerate(items):
+        medal = _MEDALS[i] if i < 3 else f"{i + 1}."
+        lines.append(f"{medal} {name}  {fmt.format(val)} {unit}")
+    return "\n".join(lines)
+
+
+def daily_title(d: date) -> str:
+    return f"🏆 今日运动排行（{d.month}月{d.day}日）"
+
+
+def weekly_title(start: date, end: date) -> str:
+    """end 为本周最后一天（含）。"""
+    return f"🏆 本周运动排行（{start.month}月{start.day}日~{end.month}月{end.day}日）"
+
+
+def monthly_title(d: date) -> str:
+    return f"🏆 本月运动排行（{d.month}月）"
+
+
+def format_leaderboards(rankings: dict, title: str) -> str:
+    """把三榜渲染为消息文本；title 为完整标题（如「🏆 今日运动排行（9月17日）」）。"""
+    return (
+        f"{title}\n"
+        "━━━━━━━━━━━━\n"
+        f"📏 运动距离排行\n{_fmt_rank(rankings.get('distance', []), 'km', '{:.2f}')}\n\n"
+        f"⛰️ 爬升排行\n{_fmt_rank(rankings.get('ascent', []), 'm', '{:.0f}')}\n\n"
+        f"🚀 单次运动距离排行\n{_fmt_rank(rankings.get('max_single', []), 'km', '{:.2f}')}"
+    )
