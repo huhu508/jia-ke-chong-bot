@@ -95,7 +95,7 @@ async def handle_query(bot: Bot, event: MessageEvent):
 
         # 已绑定平台 → 走平台接口同步
         if member is not None and member.platform:
-            stats = await asyncio.to_thread(sync.sync_daily, member, today, session)
+            stats = await asyncio.to_thread(sync.sync_daily, member.qq, member.platform, today)
             await query_cmd.finish(f"{name} 今日运动数据：\n{_format_stats(stats)}")
 
         # 未绑定 → 读截图记录（当日明细 + 累计里程）

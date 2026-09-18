@@ -48,7 +48,7 @@ def _period_of(kind: str) -> tuple[str, date, date, str]:
 
 
 async def _gather(event: MessageEvent, kind: str):
-    """拉取某成员周期汇总，返回 (name, period, span, summary_dict, member)。"""
+    """拉取某成员周期汇总，返回 (name, period, span, summary_dict, bound)。"""
     qq = event.get_user_id()
     name = getattr(event.sender, "nickname", None) or qq
     period, start, end, span = _period_of(kind)
@@ -57,18 +57,20 @@ async def _gather(event: MessageEvent, kind: str):
         member = session.get(Member, qq)
         if member is not None and member.nickname:
             name = member.nickname
-
-        # 已绑定平台：先补拉今天，保证当天数据新鲜；失败不阻断，退回已有数据
-        if member is not None and member.platform:
-            try:
-                await asyncio.to_thread(sync.sync_daily, member, date.today(), session)
-            except Exception as e:
-                logger.warning(f"周期数据同步今日失败（用已有数据）: {e}")
-
-        s = await asyncio.to_thread(summary.compute_member_summary, session, qq, start, end)
+        # 提前把绑定平台读成普通值，session 关闭后不再碰 ORM 对象
+        platform = member.platform if member is not None else ""
     finally:
         session.close()
-    return name, period, span, s, member
+
+    # 已绑定平台：先补拉今天，保证当天数据新鲜；失败不阻断，退回已有数据
+    if platform:
+        try:
+            await asyncio.to_thread(sync.sync_daily, qq, platform, date.today())
+        except Exception as e:
+            logger.warning(f"周期数据同步今日失败（用已有数据）: {e}")
+
+    s = await asyncio.to_thread(summary.compute_member_summary, qq, start, end)
+    return name, period, span, s, bool(platform)
 
 
 def _format_summary(name: str, period: str, span: str, s: dict) -> str:
@@ -155,11 +157,9 @@ def _template_advise(name: str, period: str, s: dict) -> str:
 @weekly_cmd.handle()
 async def handle_weekly(bot: Bot, event: MessageEvent):
     try:
-        name, period, span, s, member = await _gather(event, "周")
+        name, period, span, s, bound = await _gather(event, "周")
         if s["active_days"] == 0 and s["distance_km"] <= 0:
-            await weekly_cmd.finish(
-                _empty_hint(name, period, span, bool(member and member.platform))
-            )
+            await weekly_cmd.finish(_empty_hint(name, period, span, bound))
         await weekly_cmd.finish(_format_summary(name, period, span, s))
     except (FinishedException, ActionFailed):
         raise
@@ -171,11 +171,9 @@ async def handle_weekly(bot: Bot, event: MessageEvent):
 @monthly_cmd.handle()
 async def handle_monthly(bot: Bot, event: MessageEvent):
     try:
-        name, period, span, s, member = await _gather(event, "月")
+        name, period, span, s, bound = await _gather(event, "月")
         if s["active_days"] == 0 and s["distance_km"] <= 0:
-            await monthly_cmd.finish(
-                _empty_hint(name, period, span, bool(member and member.platform))
-            )
+            await monthly_cmd.finish(_empty_hint(name, period, span, bound))
         await monthly_cmd.finish(_format_summary(name, period, span, s))
     except (FinishedException, ActionFailed):
         raise
@@ -189,12 +187,10 @@ async def handle_ai(bot: Bot, event: MessageEvent, args: Message = CommandArg())
     # 可选参数：总结 月 → 总结本月；默认总结本周
     kind = "月" if "月" in args.extract_plain_text() else "周"
     try:
-        name, period, span, s, member = await _gather(event, kind)
+        name, period, span, s, bound = await _gather(event, kind)
         # 与 周数据/月数据/建议 口径一致：无数据先给友好提示，避免把全 0 数据喂给 LLM 编造总结
         if s["active_days"] == 0 and s["distance_km"] <= 0:
-            await ai_cmd.finish(
-                _empty_hint(name, period, span, bool(member and member.platform))
-            )
+            await ai_cmd.finish(_empty_hint(name, period, span, bound))
         text = await asyncio.to_thread(llm.summarize_sport, name, period, s)
         if text:
             await ai_cmd.finish(f"🤖 {name} {period}总结\n━━━━━━━━━━━━\n{text}")
@@ -229,11 +225,9 @@ async def handle_advise(bot: Bot, event: MessageEvent, args: Message = CommandAr
     # 可选参数：建议 月 → 按本月数据；默认按本周
     kind = "月" if "月" in args.extract_plain_text() else "周"
     try:
-        name, period, span, s, member = await _gather(event, kind)
+        name, period, span, s, bound = await _gather(event, kind)
         if s["active_days"] == 0 and s["distance_km"] <= 0:
-            await advise_cmd.finish(
-                _empty_hint(name, period, span, bool(member and member.platform))
-            )
+            await advise_cmd.finish(_empty_hint(name, period, span, bound))
         text = await asyncio.to_thread(llm.advise, name, period, s)
         if text:
             await advise_cmd.finish(f"🤖 {name} {period}训练建议\n━━━━━━━━━━━━\n{text}")

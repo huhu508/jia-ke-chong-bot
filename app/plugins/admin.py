@@ -48,7 +48,8 @@ async def _backfill_async(qqs: list[str] | None = None) -> None:
     """后台回填平台历史数据（默认全部已绑定成员，或指定 qq 列表）。
 
     逐日调用 provider.fetch_daily 并 upsert 进 daily_record，供周榜/月榜聚合。
-    阻塞的网络 + DB 调用放 asyncio.to_thread，避免卡住事件循环。
+    阻塞的网络 + DB 调用放 asyncio.to_thread，避免卡住事件循环；sync_history 内部自开
+    session，这里只把 (qq, platform) 普通值传进线程，不共享主线程 Session。
     """
     session = get_session()
     try:
@@ -56,19 +57,23 @@ async def _backfill_async(qqs: list[str] | None = None) -> None:
         if qqs:
             stmt = stmt.where(Member.qq.in_(qqs))
         members = session.execute(stmt).scalars().all()
-        today = date.today()
-        start = today - timedelta(days=BACKFILL_DAYS - 1)
-        end = today + timedelta(days=1)
-        for m in members:
-            try:
-                n = await asyncio.to_thread(sync.sync_history, m, start, end, session)
-                logger.info(f"回填 {m.qq}（{m.platform}）完成：{n} 天")
-            except Exception as e:
-                logger.warning(f"回填 {m.qq} 失败: {e}")
+        # 提前把绑定平台提取成普通值，关闭 session 后再回填
+        targets = [(m.qq, m.platform) for m in members]
     except Exception as e:
         logger.exception(f"后台回填失败: {e}")
+        return
     finally:
         session.close()
+
+    today = date.today()
+    start = today - timedelta(days=BACKFILL_DAYS - 1)
+    end = today + timedelta(days=1)
+    for qq, platform in targets:
+        try:
+            n = await asyncio.to_thread(sync.sync_history, qq, platform, start, end)
+            logger.info(f"回填 {qq}（{platform}）完成：{n} 天")
+        except Exception as e:
+            logger.warning(f"回填 {qq} 失败: {e}")
 
 
 @bind_cmd.handle()

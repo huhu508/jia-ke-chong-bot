@@ -5,6 +5,7 @@ from nonebot.log import logger
 from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
+from ..db import get_session
 from ..models.daily_record import DailyRecord
 from ..models.manual_distance import ManualDistance
 from ..models.member import Member
@@ -13,18 +14,18 @@ from .providers.base import DailyStats
 
 
 def _write_record(
-    member: Member, d: date, platform: str, stats: DailyStats, session: Session
+    qq: str, d: date, platform: str, stats: DailyStats, session: Session
 ) -> DailyStats:
     """把一份 DailyStats upsert 到 daily_record（同成员+日期+平台覆盖）。"""
     rec = session.execute(
         select(DailyRecord).where(
-            DailyRecord.member_qq == member.qq,
+            DailyRecord.member_qq == qq,
             DailyRecord.record_date == d,
             DailyRecord.platform == platform,
         )
     ).scalar_one_or_none()
     if rec is None:
-        rec = DailyRecord(member_qq=member.qq, record_date=d, platform=platform)
+        rec = DailyRecord(member_qq=qq, record_date=d, platform=platform)
         session.add(rec)
 
     rec.steps = stats.steps
@@ -44,15 +45,20 @@ def _write_record(
     return stats
 
 
-def sync_daily(member: Member, d: date, session: Session) -> DailyStats:
+def sync_daily(qq: str, platform: str, d: date) -> DailyStats:
     """从平台拉取某成员某天数据，并 upsert 到 daily_record。
 
-    为阻塞调用（网络 + 数据库），需在 asyncio.to_thread 中执行。
+    内部自开 session（阻塞的网络 + 数据库调用），供 asyncio.to_thread 直接执行，
+    避免把主线程的 Session 传入线程（违反 SQLAlchemy 线程安全约定）。
     """
-    provider = get_provider(member.platform)
+    provider = get_provider(platform)
     # 每用户凭据以 QQ 为键，fetch_daily 第一参传成员 QQ
-    stats = provider.fetch_daily(member.qq, d)
-    return _write_record(member, d, provider.name, stats, session)
+    stats = provider.fetch_daily(qq, d)
+    session = get_session()
+    try:
+        return _write_record(qq, d, provider.name, stats, session)
+    finally:
+        session.close()
 
 
 def record_manual_activity(member: Member, d: date, data: dict, session: Session) -> DailyRecord:
@@ -128,22 +134,26 @@ def clear_member_records(session: Session, qq: str) -> int:
     return n
 
 
-def sync_history(member: Member, start: date, end: date, session: Session) -> int:
+def sync_history(qq: str, platform: str, start: date, end: date) -> int:
     """把 [start, end) 区间的平台数据逐日回填进 daily_record（幂等 upsert）。
 
     绑定平台 / 管理员同步时调用，补齐历史明细，供周榜（7 天）/月榜（最多 31 天）
-    聚合出正确结果。逐日调用 provider.fetch_daily，单日失败不影响其它日期。
-    返回成功回填的天数。为阻塞调用，需在 asyncio.to_thread 中执行。
+    聚合出正确结果。内部自开 session（阻塞的网络 + 数据库调用），供 asyncio.to_thread
+    直接执行。逐日调用 provider.fetch_daily，单日失败不影响其它日期。返回成功回填天数。
     """
-    provider = get_provider(member.platform)
+    provider = get_provider(platform)
     done = 0
     d = start
-    while d < end:
-        try:
-            stats = provider.fetch_daily(member.qq, d)
-            _write_record(member, d, provider.name, stats, session)
-            done += 1
-        except Exception as e:
-            logger.warning(f"回填 {member.qq} {d} 失败: {e}")
-        d += timedelta(days=1)
-    return done
+    session = get_session()
+    try:
+        while d < end:
+            try:
+                stats = provider.fetch_daily(qq, d)
+                _write_record(qq, d, provider.name, stats, session)
+                done += 1
+            except Exception as e:
+                logger.warning(f"回填 {qq} {d} 失败: {e}")
+            d += timedelta(days=1)
+        return done
+    finally:
+        session.close()
