@@ -189,7 +189,12 @@ async def handle_ai(bot: Bot, event: MessageEvent, args: Message = CommandArg())
     # 可选参数：总结 月 → 总结本月；默认总结本周
     kind = "月" if "月" in args.extract_plain_text() else "周"
     try:
-        name, period, span, s, _ = await _gather(event, kind)
+        name, period, span, s, member = await _gather(event, kind)
+        # 与 周数据/月数据/建议 口径一致：无数据先给友好提示，避免把全 0 数据喂给 LLM 编造总结
+        if s["active_days"] == 0 and s["distance_km"] <= 0:
+            await ai_cmd.finish(
+                _empty_hint(name, period, span, bool(member and member.platform))
+            )
         text = await asyncio.to_thread(llm.summarize_sport, name, period, s)
         if text:
             await ai_cmd.finish(f"🤖 {name} {period}总结\n━━━━━━━━━━━━\n{text}")

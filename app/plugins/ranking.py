@@ -1,3 +1,4 @@
+import asyncio
 from datetime import date, timedelta
 
 from nonebot import on_command
@@ -13,7 +14,8 @@ monthly_cmd = on_command("月榜", aliases={"本月排行"}, priority=5, block=T
 
 async def _finish_ranking(matcher, start: date, end: date, title: str) -> None:
     try:
-        r = ranking.compute_range_rankings(start, end)
+        # compute_range_rankings 自开 session，可安全放进线程，避免同步 DB 查询阻塞事件循环
+        r = await asyncio.to_thread(ranking.compute_range_rankings, start, end)
         text = ranking.format_leaderboards(r, title)
     except Exception as e:
         logger.exception(f"排行查询失败: {e}")
