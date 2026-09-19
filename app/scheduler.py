@@ -9,7 +9,7 @@ from sqlalchemy import select
 from .config import settings
 from .db import get_session
 from .models.group import Group
-from .services import aggregator, ranking, retention
+from .services import aggregator, ranking, retention, sync
 
 driver = get_driver()
 
@@ -62,6 +62,12 @@ async def _run_broadcast() -> None:
     today = datetime.date.today()
     day = datetime.timedelta(days=1)
 
+    # 播报前先同步所有已绑定成员的今日数据，否则绑定平台后榜单可能因当天未入库而为空
+    try:
+        await asyncio.to_thread(sync.sync_today_all)
+    except Exception as e:
+        logger.warning(f"同步今日数据失败（仍用已有数据播报）: {e}")
+
     # (标签, 起始, 结束) 三段榜单，按需追加
     periods: list[tuple[str, datetime.date, datetime.date]] = [("今日", today, today + day)]
     if today.weekday() == 6:  # 周日
@@ -81,18 +87,26 @@ async def _run_broadcast() -> None:
     if not messages:
         return
 
-    bots = [b for b in get_bots().values() if isinstance(b, Bot)]
+    # 按 self_id 去重，避免 NapCat 重复反向 WS 连接导致同一 bot 播报两遍
+    bots: list[Bot] = []
+    seen_ids: set[str] = set()
+    for b in get_bots().values():
+        if isinstance(b, Bot) and b.self_id not in seen_ids:
+            seen_ids.add(b.self_id)
+            bots.append(b)
     if not bots:
         logger.warning("没有已连接的 OneBot Bot，跳过排行播报")
         return
 
-    groups = list(settings.broadcast_groups)
+    # 去重，避免 .env 手写重复群号导致同群播报两遍
+    groups = list(dict.fromkeys(settings.broadcast_groups))
     if not groups:
         try:
             groups = await asyncio.to_thread(_discover_groups)
         except Exception as e:
             logger.exception(f"发现播报群失败: {e}")
             return
+        groups = list(dict.fromkeys(groups))
     if not groups:
         logger.warning("没有可播报的群，跳过排行播报")
         return
@@ -128,8 +142,19 @@ async def _daily_broadcast_loop() -> None:
         await _run_broadcast()
 
 
+_started = False
+
+
 def start_scheduler() -> None:
-    """在 driver on_startup 阶段调用，启动后台周聚合 + 每日排行播报循环。"""
+    """在 driver on_startup 阶段调用，启动后台周聚合 + 每日排行播报循环。
+
+    幂等：若 on_startup 被重复触发，也只创建一次循环任务，避免每天 23:00 重复播报。
+    """
+    global _started
+    if _started:
+        logger.warning("调度器已启动，跳过重复启动")
+        return
+    _started = True
     asyncio.get_running_loop().create_task(_weekly_loop())
     asyncio.get_running_loop().create_task(_daily_broadcast_loop())
     logger.info(

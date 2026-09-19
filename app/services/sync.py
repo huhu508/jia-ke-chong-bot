@@ -157,3 +157,30 @@ def sync_history(qq: str, platform: str, start: date, end: date) -> int:
         return done
     finally:
         session.close()
+
+
+def sync_today_all() -> int:
+    """同步**所有已绑定成员**的今日数据，返回成功同步的人数。
+
+    榜单播报 / 手动「排行」在计算榜单前调用，保证当天数据新鲜——否则绑定 COROS 后
+    榜单会因为还没回填到今天而显示空。逐成员调用 sync_daily（各自自开 session），
+    单成员失败不影响其它成员。阻塞（网络 + DB），供 asyncio.to_thread 直接执行。
+    """
+    session = get_session()
+    try:
+        targets = [
+            (m.qq, m.platform)
+            for m in session.execute(select(Member).where(Member.platform != "")).scalars().all()
+        ]
+    finally:
+        session.close()
+
+    today = date.today()
+    ok = 0
+    for qq, platform in targets:
+        try:
+            sync_daily(qq, platform, today)
+            ok += 1
+        except Exception as e:
+            logger.warning(f"同步 {qq}（{platform}）今日数据失败: {e}")
+    return ok
