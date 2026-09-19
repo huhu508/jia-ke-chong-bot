@@ -16,7 +16,7 @@ async def handle_dice(bot: Bot, event: MessageEvent):
 
 @rand_cmd.handle()
 async def handle_rand(bot: Bot, event: MessageEvent, args: Message = CommandArg()):
-    parts = args.extract_plain_text().strip().replace("，", " ").split()
+    parts = args.extract_plain_text().strip().replace("，", " ").replace(",", " ").split()
     try:
         if len(parts) >= 2:
             a, b = int(parts[0]), int(parts[1])
@@ -30,8 +30,8 @@ async def handle_rand(bot: Bot, event: MessageEvent, args: Message = CommandArg(
 
 @lottery_cmd.handle()
 async def handle_lottery(bot: Bot, event: MessageEvent, args: Message = CommandArg()):
-    # 与 handle_rand 一致：中文逗号归一化为空格，避免「抽奖 3，甲，乙，丙」被当成一个整体
-    parts = args.extract_plain_text().strip().replace("，", " ").split()
+    # 与 handle_rand 一致：中英文逗号统一归一化为空格，避免「抽奖 3,甲,乙,丙」被当成一个整体
+    parts = args.extract_plain_text().strip().replace("，", " ").replace(",", " ").split()
     if not parts:
         await lottery_cmd.finish("用法：/抽奖 [中奖人数] 候选1 候选2 ...")
     try:
