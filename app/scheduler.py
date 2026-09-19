@@ -68,19 +68,21 @@ async def _run_broadcast() -> None:
     except Exception as e:
         logger.warning(f"同步今日数据失败（仍用已有数据播报）: {e}")
 
-    # (标签, 起始, 结束) 三段榜单，按需追加
-    periods: list[tuple[str, datetime.date, datetime.date]] = [("今日", today, today + day)]
+    # (scope, 标签, 起始, 结束) 三段榜单，按需追加
+    periods: list[tuple[str, str, datetime.date, datetime.date]] = [
+        ("day", "今日", today, today + day)
+    ]
     if today.weekday() == 6:  # 周日
         this_monday = today - datetime.timedelta(days=6)
-        periods.append(("本周", this_monday, today + day))
+        periods.append(("week", "本周", this_monday, today + day))
     if (today + day).month != today.month:  # 月末（明天进入下月）
         month_start = today.replace(day=1)
-        periods.append(("本月", month_start, today + day))
+        periods.append(("month", "本月", month_start, today + day))
 
     messages: list[str] = []
-    for label, start, end in periods:
+    for scope, label, start, end in periods:
         try:
-            r = await asyncio.to_thread(ranking.compute_range_rankings, start, end)
+            r = await asyncio.to_thread(ranking.compute_range_rankings, start, end, scope=scope)
             messages.append(ranking.format_leaderboards(r, _rank_title(label, start, end)))
         except Exception as e:
             logger.exception(f"{label}排行计算失败: {e}")

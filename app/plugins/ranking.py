@@ -20,11 +20,11 @@ async def _refresh_today() -> None:
         logger.warning(f"同步今日数据失败（仍用已有数据）: {e}")
 
 
-async def _finish_ranking(matcher, start: date, end: date, title: str) -> None:
+async def _finish_ranking(matcher, start: date, end: date, title: str, scope: str = "day") -> None:
     await _refresh_today()
     try:
         # compute_range_rankings 自开 session，可安全放进线程，避免同步 DB 查询阻塞事件循环
-        r = await asyncio.to_thread(ranking.compute_range_rankings, start, end)
+        r = await asyncio.to_thread(ranking.compute_range_rankings, start, end, scope=scope)
         text = ranking.format_leaderboards(r, title)
     except Exception as e:
         logger.exception(f"排行查询失败: {e}")
@@ -43,7 +43,8 @@ async def handle_weekly(bot: Bot, event: MessageEvent):
     today = date.today()
     this_monday = today - timedelta(days=today.weekday())
     await _finish_ranking(
-        weekly_cmd, this_monday, today + timedelta(days=1), ranking.weekly_title(this_monday, today)
+        weekly_cmd, this_monday, today + timedelta(days=1), ranking.weekly_title(this_monday, today),
+        scope="week",
     )
 
 
@@ -52,5 +53,6 @@ async def handle_monthly(bot: Bot, event: MessageEvent):
     today = date.today()
     month_start = today.replace(day=1)
     await _finish_ranking(
-        monthly_cmd, month_start, today + timedelta(days=1), ranking.monthly_title(today)
+        monthly_cmd, month_start, today + timedelta(days=1), ranking.monthly_title(today),
+        scope="month",
     )

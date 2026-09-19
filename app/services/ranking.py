@@ -16,6 +16,7 @@ from sqlalchemy.orm import Session
 
 from ..db import get_session
 from ..models.daily_record import DailyRecord
+from ..models.manual_distance import ManualDistance
 from ..models.member import Member
 
 _TOP_N = 10
@@ -23,11 +24,21 @@ _MEDALS = ["🥇", "🥈", "🥉"]
 
 
 def compute_range_rankings(
-    start: date, end: date, session: Session | None = None, top_n: int = _TOP_N
+    start: date,
+    end: date,
+    session: Session | None = None,
+    top_n: int = _TOP_N,
+    scope: str = "day",
 ) -> dict:
     """聚合 [start, end) 区间的 daily_record，返回三榜。
 
     形如 {distance: [(昵称, 值), ...], ascent: [...], max_single: [...]}。
+
+    scope 取值（决定未绑定成员的距离榜数据源）：
+      - "day"：日榜，聚合所有 daily_record（含截图 manual 明细）；
+      - "week"：周榜，未绑定成员的距离榜改用 ManualDistance.week_distance_km（本周累计），
+        不依赖可能已被 retention 清理的明细；绑定成员仍按明细聚合；
+      - "month"：月榜，同 "day"。
     """
     own_session = session is None
     if own_session:
@@ -50,6 +61,19 @@ def compute_range_rankings(
             distance[qq] += rec.distance_km or 0.0
             ascent[qq] += rec.ascent_meters or 0.0
             max_single[qq] = max(max_single[qq], rec.max_activity_distance_km or 0.0)
+
+        # 周榜：未绑定成员的距离榜改用「本周累计」（ManualDistance 只存未绑定成员的累加值，
+        # 绑定时会被 clear_member_records 清空，故这里取到的必是当前未绑定成员）。
+        if scope == "week":
+            md_rows = session.execute(
+                select(ManualDistance, Member.nickname)
+                .join(Member, ManualDistance.member_qq == Member.qq)
+                .where(ManualDistance.week_distance_km > 0)
+            ).all()
+            for md, nick in md_rows:
+                qq = md.member_qq
+                nicknames.setdefault(qq, nick or qq)
+                distance[qq] = round(md.week_distance_km, 2)
 
         def _rank(agg: dict) -> list[tuple[str, float]]:
             return [

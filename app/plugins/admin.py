@@ -157,7 +157,8 @@ async def handle_garmin_bind(bot: Bot, event: MessageEvent, args: Message = Comm
 
     asyncio.create_task(_backfill_async([qq]))
     await garmin_bind_cmd.finish(
-        f"佳明绑定成功 ✅\n已绑定账号：{email}\n正在后台同步你的历史数据，稍后发「今日」即可查询"
+        f"佳明绑定成功 ✅\n已绑定账号：{email}\n"
+        "之前的截图里程已由佳明数据取代，正在后台同步你的历史数据，稍后发「今日」即可查询"
     )
 
 
@@ -202,7 +203,8 @@ async def handle_confirm(bot: Bot, event: MessageEvent):
     # 后台回填历史数据，供周榜/月榜（不阻塞绑定确认）
     asyncio.create_task(_backfill_async([qq]))
     await confirm_cmd.finish(
-        "COROS 授权成功，已绑定 ✅ 正在后台同步你的历史数据，稍后发「今日」即可查询"
+        "COROS 授权成功，已绑定 ✅ 之前的截图里程已由高驰数据取代，"
+        "正在后台同步你的历史数据，稍后发「今日」即可查询"
     )
 
 
@@ -224,7 +226,10 @@ async def handle_unbind(bot: Bot, event: MessageEvent):
 
     # 清掉凭据/token，保证再次绑定需重新授权
     credentials.delete(qq, platform)
-    await unbind_cmd.finish("已解绑 ✅ 重新绑定时会再次要求授权/填写账号")
+    await unbind_cmd.finish(
+        "已解绑 ✅ 之前的平台数据已清除，现在可发运动截图重新记录；"
+        "重新绑定时会再次要求授权/填写账号"
+    )
 
 
 @status_cmd.handle()

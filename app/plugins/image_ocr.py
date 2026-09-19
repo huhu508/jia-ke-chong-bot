@@ -216,7 +216,14 @@ async def handle_image(bot: Bot, event: MessageEvent):
     finally:
         session.close()
 
-    if bound or "distance_km" not in data:
+    if bound:
+        # 已绑定平台：截图仅回显不写库（数据已由平台接口自动同步），并明确告知
+        # 「以 App 为准」，避免用户误以为截图又被记了一次、结果「今日」却没变化。
+        await image_matcher.finish(
+            _format_cheer(data)
+            + "\n\n📌 你已绑定平台，本次截图未计入数据，今日与排行均以 App 同步为准"
+        )
+    if "distance_km" not in data:
         await image_matcher.finish(_format_cheer(data))
 
     # 重复打卡去重：同一张图短时间内重发，不重复累计

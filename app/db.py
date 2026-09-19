@@ -23,6 +23,10 @@ _MIGRATIONS = {
         "avg_hr": "INTEGER DEFAULT 0",
         "max_activity_distance_km": "FLOAT DEFAULT 0",
     },
+    "manual_distance": {
+        "week_start": "DATE",
+        "week_distance_km": "FLOAT DEFAULT 0",
+    },
 }
 
 

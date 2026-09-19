@@ -54,10 +54,9 @@ class GarminProvider(SportProvider):
             raw = {}
 
         stats.steps = int(raw.get("totalSteps") or 0)
-        stats.distance_km = round(float(raw.get("totalDistanceMeters") or 0) / 1000, 2)
-        # 新版返回 activeSeconds（总活动秒数）与 *IntensityMinutes（分），此处用总活动秒数换算分钟
-        stats.active_minutes = int(raw.get("activeSeconds") or 0) // 60
-        stats.calories = int(raw.get("activeKilocalories") or 0)
+        # 距离 / 时长 / 消耗 不取 get_stats 的「全天」口径——totalDistanceMeters 含日常步行、
+        # activeSeconds / activeKilocalories 含日常活动，会高估运动量。这三项改由
+        # _apply_activity_metrics 从当日活动列表聚合，只统计用户主动记录的运动。
 
         # 静息心率
         try:
@@ -79,14 +78,24 @@ class GarminProvider(SportProvider):
             acts = client.get_activities_by_date(iso, iso) or []
         except Exception:
             acts = []
-        self._apply_activity_metrics(stats, acts, raw)
+        self._apply_activity_metrics(stats, acts)
 
         stats.raw = raw
         return stats
 
     @staticmethod
-    def _apply_activity_metrics(stats: DailyStats, acts, raw: dict) -> None:
-        """从当日活动列表聚合爬升/单次最长/配速/心率/负荷。"""
+    def _apply_activity_metrics(stats: DailyStats, acts) -> None:
+        """从当日活动列表聚合运动指标（距离/时长/消耗/爬升/配速/心率/负荷）。
+
+        与 get_stats 的「全天」口径区分：这里只统计用户主动记录的运动活动，
+          - distance_km / active_minutes / calories：活动 distance/duration/calories 求和，
+            而非 totalDistanceMeters（含日常步行）/ activeSeconds / activeKilocalories；
+          - training_load：取活动 activityTrainingLoad（训练负荷）之和，
+            而非 aerobic/anaerobicTrainingEffect（训练效果 TE，0~5 分，语义不同）。
+        """
+        total_dist_km = 0.0
+        total_duration_s = 0.0
+        total_calories = 0.0
         ascent = 0.0
         max_dist = 0.0
         load = 0.0
@@ -106,6 +115,9 @@ class GarminProvider(SportProvider):
             try:
                 dist_m = float(a.get("distance") or 0)
                 dist_km = dist_m / 1000.0
+                total_dist_km += dist_km
+                total_duration_s += float(a.get("duration") or 0)
+                total_calories += float(a.get("calories") or 0)
                 ascent += float(a.get("elevationGain") or 0)
                 max_dist = max(max_dist, dist_km)
 
@@ -113,8 +125,8 @@ class GarminProvider(SportProvider):
                 if hr:
                     hrs.append(int(hr))
 
-                load += float(a.get("aerobicTrainingEffect") or 0)
-                load += float(a.get("anaerobicTrainingEffect") or 0)
+                # 训练负荷（activityTrainingLoad），不是训练效果（aerobic/anaerobicTrainingEffect）
+                load += float(a.get("activityTrainingLoad") or 0)
 
                 speed = float(a.get("averageSpeed") or 0)
                 if dist_km > best_dist and speed > 0:
@@ -123,19 +135,14 @@ class GarminProvider(SportProvider):
             except (TypeError, ValueError):
                 continue
 
+        stats.distance_km = round(total_dist_km, 2)
+        stats.active_minutes = int(total_duration_s // 60)
+        stats.calories = int(total_calories)
         stats.ascent_meters = round(ascent, 2)
         stats.max_activity_distance_km = round(max_dist, 2)
         stats.avg_hr = int(round(sum(hrs) / len(hrs))) if hrs else 0
         stats.avg_pace_sec_per_km = round(best_pace, 1) if best_pace else 0.0
-        # 负荷：优先活动训练效果之和，否则用强度分钟数近似
         stats.training_load = round(load, 2)
-        if not stats.training_load:
-            stats.training_load = float(
-                raw.get("intensityMinutes")
-                or raw.get("moderateIntensityMinutes")
-                or raw.get("vigorousIntensityMinutes")
-                or 0
-            )
 
     @staticmethod
     def _extract_sleep_hours(sleep) -> float:

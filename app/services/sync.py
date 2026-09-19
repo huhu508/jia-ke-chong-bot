@@ -102,16 +102,28 @@ def record_manual_activity(member: Member, d: date, data: dict, session: Session
 
 
 def add_manual_distance(member: Member, distance_km: float, session: Session) -> float:
-    """把识别到的距离累加到成员的累计里程，返回累加后的总值。
+    """把识别到的距离累加到成员的累计里程，返回累加后的总里程。
 
+    同时维护两条链：
+      - total_distance_km：历史总累计（供「今日」展示）；
+      - week_distance_km：本周累计（供周排行），跨周自动清零重计。
     未绑定平台的成员通过截图手动记录时使用；只存距离和，不留明细。
     为阻塞调用，需在 asyncio.to_thread 中执行。
     """
     rec = session.get(ManualDistance, member.qq)
     if rec is None:
-        rec = ManualDistance(member_qq=member.qq, total_distance_km=0.0)
+        rec = ManualDistance(member_qq=member.qq, total_distance_km=0.0, week_distance_km=0.0)
         session.add(rec)
+
+    # 跨周重置：当前周一与记录的 week_start 不一致时，本周累计清零、更新周起始
+    today = date.today()
+    this_monday = today - timedelta(days=today.weekday())
+    if rec.week_start != this_monday:
+        rec.week_start = this_monday
+        rec.week_distance_km = 0.0
+
     rec.total_distance_km = round(rec.total_distance_km + distance_km, 2)
+    rec.week_distance_km = round(rec.week_distance_km + distance_km, 2)
     session.commit()
     return rec.total_distance_km
 
