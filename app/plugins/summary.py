@@ -55,8 +55,8 @@ async def _gather(event: MessageEvent, kind: str):
     session = get_session()
     try:
         member = session.get(Member, qq)
-        if member is not None and member.nickname:
-            name = member.nickname
+        if member is not None:
+            name = member.display_name
         # 提前把绑定平台读成普通值，session 关闭后不再碰 ORM 对象
         platform = member.platform if member is not None else ""
     finally:

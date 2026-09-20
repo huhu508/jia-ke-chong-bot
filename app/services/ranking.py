@@ -45,7 +45,7 @@ def compute_range_rankings(
         session = get_session()
     try:
         rows = session.execute(
-            select(DailyRecord, Member.nickname)
+            select(DailyRecord, Member)
             .join(Member, DailyRecord.member_qq == Member.qq, isouter=True)
             .where(DailyRecord.record_date >= start, DailyRecord.record_date < end)
         ).all()
@@ -55,9 +55,9 @@ def compute_range_rankings(
         max_single = defaultdict(float)
         nicknames: dict[str, str] = {}
 
-        for rec, nick in rows:
+        for rec, member in rows:
             qq = rec.member_qq
-            nicknames.setdefault(qq, nick or qq)
+            nicknames.setdefault(qq, member.display_name if member else qq)
             distance[qq] += rec.distance_km or 0.0
             ascent[qq] += rec.ascent_meters or 0.0
             max_single[qq] = max(max_single[qq], rec.max_activity_distance_km or 0.0)
@@ -66,13 +66,13 @@ def compute_range_rankings(
         # 绑定时会被 clear_member_records 清空，故这里取到的必是当前未绑定成员）。
         if scope == "week":
             md_rows = session.execute(
-                select(ManualDistance, Member.nickname)
+                select(ManualDistance, Member)
                 .join(Member, ManualDistance.member_qq == Member.qq)
                 .where(ManualDistance.week_distance_km > 0)
             ).all()
-            for md, nick in md_rows:
+            for md, member in md_rows:
                 qq = md.member_qq
-                nicknames.setdefault(qq, nick or qq)
+                nicknames.setdefault(qq, member.display_name)
                 # week_distance_km 只在「本周有新增截图」时被 add_manual_distance 重置为本周值；
                 # 若 week_start 不是本周一（=start），说明该成员本周尚未记录，week_distance_km
                 # 仍是上周旧值，不能计入本周 → 跳过，distance[qq] 保留 daily_record 的本周聚合。

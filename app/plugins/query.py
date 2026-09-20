@@ -89,9 +89,9 @@ async def handle_query(bot: Bot, event: MessageEvent):
     session = get_session()
     try:
         member = session.get(Member, qq)
-        # 优先用库里存的 QQ 昵称，保证「今日」与榜单显示一致
-        if member is not None and member.nickname:
-            name = member.nickname
+        # 优先用库里的显示昵称（自定义 > QQ 昵称），保证「今日」与榜单显示一致
+        if member is not None:
+            name = member.display_name
 
         # 已绑定平台 → 走平台接口同步
         if member is not None and member.platform:

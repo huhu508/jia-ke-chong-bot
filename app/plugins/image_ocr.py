@@ -222,8 +222,8 @@ async def handle_image(bot: Bot, event: MessageEvent):
     try:
         member = session.get(Member, qq)
         bound = member is not None and bool(member.platform)
-        if member is not None and member.nickname:
-            name = member.nickname
+        if member is not None:
+            name = member.display_name
     finally:
         session.close()
 
@@ -257,6 +257,7 @@ async def handle_image(bot: Bot, event: MessageEvent):
             **{k: v for k, v in data.items() if k in DailyStats.model_fields},
         )
         sync.record_manual_activity(member, date.today(), stats, session)
+        sync.log_checkin(qq, date.today(), data["distance_km"], session)
         _mark_seen(qq, img_md5)
     except Exception as e:
         logger.exception(f"[图片识别] qq={qq} 记录失败: {e}")

@@ -6,6 +6,7 @@ from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
 from ..db import get_session
+from ..models.checkin_log import CheckinLog
 from ..models.daily_record import DailyRecord
 from ..models.manual_distance import ManualDistance
 from ..models.member import Member
@@ -102,6 +103,57 @@ def record_manual_activity(
     return rec
 
 
+def log_checkin(qq: str, d: date, distance_km: float, session: Session) -> None:
+    """记录一次截图打卡的明细（供「删除最近一次打卡」精确回退）。"""
+    session.add(CheckinLog(member_qq=qq, record_date=d, distance_km=distance_km))
+    session.commit()
+
+
+def undo_last_checkin(qq: str, session: Session) -> tuple[float, date | None]:
+    """撤销某成员最近一次截图打卡，返回 (回退距离, 打卡日期)；无记录返回 (0.0, None)。
+
+    回退三处，保证累计里程与当日明细一致：
+      1. manual_distance：total / 本周累计各扣回该次距离（跨周时本周值可能已重置，只扣本周一的）；
+      2. daily_record(platform="manual")：当日明细距离扣回、次数减一，归零则删行；
+      3. checkin_log：删除这条明细。
+    SQLite 单条删除极快，可直接在事件循环内同步执行。
+    """
+    last = session.execute(
+        select(CheckinLog).where(CheckinLog.member_qq == qq).order_by(CheckinLog.id.desc())
+    ).scalars().first()
+    if last is None:
+        return 0.0, None
+
+    dist = last.distance_km or 0.0
+    d = last.record_date
+
+    md = session.get(ManualDistance, qq)
+    if md is not None:
+        md.total_distance_km = round(max(0.0, (md.total_distance_km or 0.0) - dist), 2)
+        that_monday = d - timedelta(days=d.weekday())
+        if md.week_start == that_monday:
+            md.week_distance_km = round(max(0.0, (md.week_distance_km or 0.0) - dist), 2)
+
+    rec = session.execute(
+        select(DailyRecord).where(
+            DailyRecord.member_qq == qq,
+            DailyRecord.record_date == d,
+            DailyRecord.platform == "manual",
+        )
+    ).scalar_one_or_none()
+    if rec is not None:
+        rec.activities_count = max(0, (rec.activities_count or 0) - 1)
+        new_dist = round((rec.distance_km or 0.0) - dist, 2)
+        if new_dist <= 0 and (rec.activities_count or 0) <= 0:
+            session.delete(rec)
+        else:
+            rec.distance_km = max(0.0, new_dist)
+
+    session.delete(last)
+    session.commit()
+    return dist, d
+
+
 def add_manual_distance(member: Member, distance_km: float, session: Session) -> float:
     """把识别到的距离累加到成员的累计里程，返回累加后的总里程。
 
@@ -143,6 +195,7 @@ def clear_member_records(session: Session, qq: str) -> int:
     """
     n = session.execute(delete(DailyRecord).where(DailyRecord.member_qq == qq)).rowcount or 0
     session.execute(delete(ManualDistance).where(ManualDistance.member_qq == qq))
+    session.execute(delete(CheckinLog).where(CheckinLog.member_qq == qq))
     session.commit()
     return n
 

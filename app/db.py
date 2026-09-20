@@ -21,6 +21,9 @@ SessionLocal = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False
 # 新增列迁移清单：表名 -> {列名: "SQL类型 DEFAULT 默认值"}。
 # create_all 只建新表、不会给已存在的表加列，历史库必须靠这里补列。
 _MIGRATIONS = {
+    "member": {
+        "custom_nickname": "VARCHAR(64) DEFAULT ''",
+    },
     "daily_record": {
         "ascent_meters": "FLOAT DEFAULT 0",
         "training_load": "FLOAT DEFAULT 0",
