@@ -73,7 +73,11 @@ def compute_range_rankings(
             for md, nick in md_rows:
                 qq = md.member_qq
                 nicknames.setdefault(qq, nick or qq)
-                distance[qq] = round(md.week_distance_km, 2)
+                # week_distance_km 只在「本周有新增截图」时被 add_manual_distance 重置为本周值；
+                # 若 week_start 不是本周一（=start），说明该成员本周尚未记录，week_distance_km
+                # 仍是上周旧值，不能计入本周 → 跳过，distance[qq] 保留 daily_record 的本周聚合。
+                if md.week_start == start:
+                    distance[qq] = round(md.week_distance_km, 2)
 
         def _rank(agg: dict) -> list[tuple[str, float]]:
             return [

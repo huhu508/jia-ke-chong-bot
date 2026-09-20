@@ -10,6 +10,7 @@ from typing import Optional
 from urllib.parse import parse_qs, urlencode, urlparse
 
 import httpx
+from nonebot.log import logger
 
 from .. import crypto
 from .base import DailyStats, SportProvider
@@ -113,11 +114,18 @@ class CorosProvider(SportProvider):
         login_ticket = None
         authorized = False
         while time.monotonic() < deadline:
-            resp = httpx.post(
-                f"{self._issuer}/api/v1/cli/login-sessions/{pending['session_id']}/claim",
-                headers={**self._UA, "X-Poll-Token": pending["poll_token"]},
-                timeout=30,
-            ).json()
+            try:
+                resp = httpx.post(
+                    f"{self._issuer}/api/v1/cli/login-sessions/{pending['session_id']}/claim",
+                    headers={**self._UA, "X-Poll-Token": pending["poll_token"]},
+                    timeout=30,
+                ).json()
+            except Exception as e:
+                # 网络抖动 / 服务端瞬断：本轮跳过，按轮询间隔继续直到超时，
+                # 避免一次抖动就把「绑定确认」打成失败。
+                logger.warning(f"COROS 授权轮询请求失败（继续重试）: {e}")
+                time.sleep(pending["poll_interval"])
+                continue
             status = str(resp.get("status", "")).lower()
             if status == "authorized":
                 login_ticket = resp.get("loginTicket")

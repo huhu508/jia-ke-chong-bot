@@ -10,7 +10,12 @@ from .models.base import Base
 
 logger = logging.getLogger(__name__)
 
-engine = create_engine(settings.db_url, future=True)
+# SQLite 并发写（后台回填历史 + 用户查询同时落库）可能触发 "database is locked"，
+# 设 busy_timeout 让写操作等待重试而非立即抛错（仅对 SQLite 生效，其它后端忽略）。
+_engine_kwargs: dict = {"future": True}
+if settings.db_url.startswith("sqlite"):
+    _engine_kwargs["connect_args"] = {"timeout": 30}
+engine = create_engine(settings.db_url, **_engine_kwargs)
 SessionLocal = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)
 
 # 新增列迁移清单：表名 -> {列名: "SQL类型 DEFAULT 默认值"}。

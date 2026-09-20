@@ -26,15 +26,14 @@ NoneBot2 + OneBot v11（NapCat）· SQLAlchemy + SQLite · RapidOCR（本地识�
 └── app/
     ├── config.py           # pydantic-settings 配置（读 .env）
     ├── db.py               # SQLAlchemy 引擎 / 会话 / init_db
-    ├── scheduler.py        # 周聚合 + 每日排行播报调度
-    ├── models/             # ORM：Base / Member / DailyRecord / WeeklyStat / ManualDistance / Group
+    ├── models/             # ORM：Base / Member / DailyRecord / ManualDistance / Group
     ├── services/
     │   ├── providers/      # 平台适配层：base / garmin / coros
     │   ├── sync.py         # 平台拉取 + 截图写入 + 历史回填
     │   ├── ranking.py      # 日/周/月三榜聚合与格式化
     │   ├── summary.py      # 个人周期汇总
     │   ├── diagnose.py     # 训练诊断：负荷/恢复/配速趋势 + 比赛成绩算 VO₂max
-    │   ├── aggregator.py   # 日明细 → 周汇总（幂等）
+    │   ├── tasks.py        # 每日排行播报 + 过期明细清理（调度器）
     │   ├── retention.py    # 原始明细保留 45 天后清理
     │   ├── ocr.py          # RapidOCR 本地识别（数据不出本机）
     │   ├── parsers.py      # 坐标关联解析 + 文本兜底
@@ -116,7 +115,7 @@ NapCat 负责登录 QQ 并通过反向 WebSocket 把消息推给机器人：
 | `绑定确认` | 完成 COROS 授权后确认绑定 |
 | `我的绑定` / `解绑` | 查看 / 解除绑定 |
 | `机器状态` | 查看各平台接入人数 |
-| `同步数据` / `周聚合` | 管理员：同步历史 / 手动周聚合 + 清理 |
+| `同步数据` | 管理员：后台回填近 31 天平台历史数据 |
 | `帮助`（`菜单` / `help`） | 查看命令菜单 |
 | `@我 + 问题` | 运动知识问答（配速 / 跑量 / 恢复…） |
 | `抽奖 [N] 候选…` / `骰子` / `随机数 [a] [b]` | 抽奖与随机玩法 |
@@ -128,10 +127,9 @@ NapCat 负责登录 QQ 并通过反向 WebSocket 把消息推给机器人：
 
 | 任务 | 时间 | 说明 |
 |---|---|---|
-| 每日排行播报 | 每天 23:00 | 播今日榜；周日追加周榜、月末追加月榜，分段独立发送 |
-| 周聚合 | 每周一 00:10 | 幂等聚合 + 清理 45 天前的原始明细 |
+| 每日排行播报 | 每天 23:00 | 播报前先清理过期明细 + 同步今日数据；周日追加周榜、月末追加月榜，分段独立发送 |
 
-时间均可在 `.env` 用 `BROADCAST_HOUR/BROADCAST_MINUTE`、`WEEKLY_HOUR/WEEKLY_MINUTE` 调整。
+时间可在 `.env` 用 `BROADCAST_HOUR/BROADCAST_MINUTE` 调整。周榜/月榜由 `daily_record` 直接聚合，无需单独的周聚合任务。
 
 ## 配置说明（.env）
 

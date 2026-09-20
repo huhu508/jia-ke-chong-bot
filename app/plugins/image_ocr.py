@@ -22,8 +22,8 @@ from ..db import get_session
 from ..models.member import Member
 from ..services import cheers, llm, parsers, sync
 from ..services.member import get_or_create_member
-from ..services.providers.base import DailyStats
 from ..services.ocr import recognize_boxes
+from ..services.providers.base import DailyStats
 
 
 def _has_image(event) -> bool:

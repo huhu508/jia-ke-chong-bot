@@ -236,13 +236,13 @@ def compute_diagnosis(session: Session, qq: str, race: tuple[float, int] | None 
         ),
     }
 
-    # 配速趋势：最近一周 vs 三周前
+    # 配速趋势：最近一周 vs 三周前（buckets[0]=最近 7 天，buckets[3]=三周前）
     pace_trend = None
-    if buckets[0]["pace"] and buckets[2]["pace"]:
-        delta = buckets[0]["pace"] - buckets[2]["pace"]
+    if buckets[0]["pace"] and buckets[3]["pace"]:
+        delta = buckets[0]["pace"] - buckets[3]["pace"]
         pace_trend = {
             "latest": buckets[0]["pace"],
-            "three_weeks_ago": buckets[2]["pace"],
+            "three_weeks_ago": buckets[3]["pace"],
             "delta": delta,
         }
 
