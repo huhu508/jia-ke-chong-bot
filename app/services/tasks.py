@@ -1,3 +1,10 @@
+"""定时任务：每日排行播报 + 过期明细清理。
+
+从 app/scheduler.py 归位到服务层。原「周聚合」任务与周汇总中间表已一并删除——
+周榜/月榜直接由 daily_record 聚合，无需中间表。
+过期明细清理从「每周一」改为「每日播报前」执行，幂等、更及时。
+"""
+
 import asyncio
 import datetime
 
@@ -6,46 +13,12 @@ from nonebot.adapters.onebot.v11 import Bot
 from nonebot.log import logger
 from sqlalchemy import select
 
-from .config import settings
-from .db import get_session
-from .models.group import Group
-from .services import aggregator, ranking, retention, sync
+from ..config import settings
+from ..db import get_session
+from ..models.group import Group
+from . import ranking, retention, sync
 
 driver = get_driver()
-
-
-async def _run_weekly() -> None:
-    today = datetime.date.today()
-    this_monday = today - datetime.timedelta(days=today.weekday())
-    last_monday = this_monday - datetime.timedelta(days=7)
-    try:
-        n_agg = await asyncio.to_thread(aggregator.aggregate_week, last_monday)
-        n_del = await asyncio.to_thread(
-            retention.cleanup_daily, today - datetime.timedelta(days=retention.RETENTION_DAYS)
-        )
-        logger.info(
-            f"周聚合完成：聚合 {n_agg} 组，清理 {n_del} 条原始明细"
-            f"（保留近 {retention.RETENTION_DAYS} 天供周榜/月榜）"
-        )
-    except Exception as e:
-        logger.exception(f"周聚合任务失败: {e}")
-
-
-async def _weekly_loop() -> None:
-    hour = settings.weekly_hour
-    minute = settings.weekly_minute
-    while True:
-        now = datetime.datetime.now()
-        # 计算下一个周一的 hour:minute
-        days_ahead = (7 - now.weekday()) % 7
-        target = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
-        if days_ahead == 0 and now >= target:
-            days_ahead = 7
-        next_run = (now + datetime.timedelta(days=days_ahead)).replace(
-            hour=hour, minute=minute, second=0, microsecond=0
-        )
-        await asyncio.sleep((next_run - now).total_seconds())
-        await _run_weekly()
 
 
 def _discover_groups() -> list[int]:
@@ -61,6 +34,14 @@ async def _run_broadcast() -> None:
     """计算并播报排行：每日今日榜；周日追加周榜、月末追加月榜，逐段独立发送。"""
     today = datetime.date.today()
     day = datetime.timedelta(days=1)
+
+    # 播报前先清理过期明细（保留近 RETENTION_DAYS 天供周榜/月榜），幂等、每日执行
+    try:
+        await asyncio.to_thread(
+            retention.cleanup_daily, today - datetime.timedelta(days=retention.RETENTION_DAYS)
+        )
+    except Exception as e:
+        logger.warning(f"清理过期明细失败（不影响播报）: {e}")
 
     # 播报前先同步所有已绑定成员的今日数据，否则绑定平台后榜单可能因当天未入库而为空
     try:
@@ -113,6 +94,14 @@ async def _run_broadcast() -> None:
         logger.warning("没有可播报的群，跳过排行播报")
         return
 
+    # 群白名单：仅在 allowed_groups 内的群播报（未配置则不限制）
+    if settings.allowed_groups:
+        allowed = {int(g) for g in settings.allowed_groups}
+        groups = [g for g in groups if g in allowed]
+        if not groups:
+            logger.warning("没有白名单内的可播报群，跳过排行播报")
+            return
+
     for bot in bots:
         for gid in groups:
             for text in messages:
@@ -148,7 +137,7 @@ _started = False
 
 
 def start_scheduler() -> None:
-    """在 driver on_startup 阶段调用，启动后台周聚合 + 每日排行播报循环。
+    """在 driver on_startup 阶段调用，启动每日排行播报循环。
 
     幂等：若 on_startup 被重复触发，也只创建一次循环任务，避免每天 23:00 重复播报。
     """
@@ -157,11 +146,7 @@ def start_scheduler() -> None:
         logger.warning("调度器已启动，跳过重复启动")
         return
     _started = True
-    asyncio.get_running_loop().create_task(_weekly_loop())
     asyncio.get_running_loop().create_task(_daily_broadcast_loop())
-    logger.info(
-        f"周聚合调度已启动（每周一 {settings.weekly_hour:02d}:{settings.weekly_minute:02d}）"
-    )
     logger.info(
         f"每日排行播报已启动（每天 {settings.broadcast_hour:02d}:{settings.broadcast_minute:02d}）"
     )

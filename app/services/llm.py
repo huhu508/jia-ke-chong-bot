@@ -17,7 +17,6 @@ from nonebot.log import logger
 from ..config import settings
 from .cheers import format_pace
 
-_ZHIPU_BASE = "https://open.bigmodel.cn/api/paas/v4/chat/completions"
 _TIMEOUT = 15.0
 
 # 统一人格：所有 LLM 交互共用，保证「总结/鼓励/建议/打卡点评/问答」语气一致。
@@ -30,7 +29,7 @@ def _chat(messages: list[dict], max_tokens: int = 400, timeout: float = _TIMEOUT
         return None
     try:
         resp = httpx.post(
-            _ZHIPU_BASE,
+            settings.llm_base_url,
             headers={"Authorization": f"Bearer {settings.zhipu_api_key}"},
             json={
                 "model": settings.zhipu_model,

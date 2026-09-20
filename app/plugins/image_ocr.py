@@ -22,6 +22,7 @@ from ..db import get_session
 from ..models.member import Member
 from ..services import cheers, llm, parsers, sync
 from ..services.member import get_or_create_member
+from ..services.providers.base import DailyStats
 from ..services.ocr import recognize_boxes
 
 
@@ -189,6 +190,16 @@ async def handle_image(bot: Bot, event: MessageEvent):
             "· 若要查自己的周/月汇总：直接发「周数据」「月数据」，我会按平台接口自动统计。"
         )
 
+    # 合理性校验：OCR 偶发把步数 / 卡路里 / 统计页总量误识别成距离，落库前先清洗+拦截，
+    # 超范围的夸张跑量直接拒绝，避免污染排行与累计里程（这是 detect_page_kind 之外的最后防线）。
+    data, reject_reason = parsers.sanitize_activity(data)
+    if reject_reason:
+        logger.info(f"[图片识别] qq={qq} 数据不合理，拒绝记录: {reject_reason}")
+        await image_matcher.finish(
+            f"⚠️ {reject_reason}，本次未记录。\n"
+            "若是单次运动详情，请重发一张更清晰的截图；若是多天汇总，直接发「周数据 / 月数据」查看。"
+        )
+
     if not any(
         k in data
         for k in (
@@ -239,8 +250,13 @@ async def handle_image(bot: Bot, event: MessageEvent):
         member = get_or_create_member(session, qq, name)
         session.commit()
         total = sync.add_manual_distance(member, data["distance_km"], session)
-        # 截图记录也进当日明细，让未绑定成员出现在每日排行里
-        sync.record_manual_activity(member, date.today(), data, session)
+        # 截图记录也进当日明细，让未绑定成员出现在每日排行里。
+        # parsers 返回 dict，统一转成 DailyStats（过滤非模型字段，防御未来新增键）。
+        stats = DailyStats(
+            date=date.today(),
+            **{k: v for k, v in data.items() if k in DailyStats.model_fields},
+        )
+        sync.record_manual_activity(member, date.today(), stats, session)
         _mark_seen(qq, img_md5)
     except Exception as e:
         logger.exception(f"[图片识别] qq={qq} 记录失败: {e}")

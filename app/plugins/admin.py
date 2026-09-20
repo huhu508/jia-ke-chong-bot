@@ -8,7 +8,6 @@ from nonebot.adapters.onebot.v11 import (
     MessageEvent,
     PrivateMessageEvent,
 )
-from nonebot.exception import ActionFailed
 from nonebot.log import logger
 from nonebot.params import CommandArg
 from sqlalchemy import func, select
@@ -16,7 +15,7 @@ from sqlalchemy import func, select
 from ..db import get_session
 from ..models.manual_distance import ManualDistance
 from ..models.member import Member
-from ..services import aggregator, credentials, retention, sync
+from ..services import credentials, sync
 from ..services.member import get_or_create_member
 from ..services.providers import VALID_PLATFORMS, get_provider
 
@@ -26,7 +25,6 @@ confirm_cmd = on_command("绑定确认", priority=5, block=True)
 unbind_cmd = on_command("解绑", priority=5, block=True)
 status_cmd = on_command("机器状态", priority=5, block=True)
 sync_all_cmd = on_command("同步数据", priority=5, block=True)
-aggregate_cmd = on_command("周聚合", priority=5, block=True)
 garmin_bind_cmd = on_command("garmin绑定", aliases={"佳明绑定"}, priority=5, block=True)
 
 # 平台展示名（绑定提示 / 状态 / 我的绑定 三处共用）
@@ -283,25 +281,3 @@ async def handle_sync_all(bot: Bot, event: MessageEvent):
         f"已开始后台同步 {len(members)} 人的历史数据（近 {BACKFILL_DAYS} 天），"
         "完成后发「排行 / 周榜 / 月榜」即可看到正确数据"
     )
-
-
-@aggregate_cmd.handle()
-async def handle_aggregate(bot: Bot, event: MessageEvent):
-    if not _is_superuser(event):
-        await aggregate_cmd.finish("仅管理员可执行")
-    today = date.today()
-    last_monday = today - timedelta(days=today.weekday() + 7)
-    try:
-        n_agg = await asyncio.to_thread(aggregator.aggregate_week, last_monday)
-        n_del = await asyncio.to_thread(
-            retention.cleanup_daily, today - timedelta(days=retention.RETENTION_DAYS)
-        )
-        await aggregate_cmd.finish(
-            f"周聚合完成：聚合 {n_agg} 组，清理 {n_del} 条原始明细"
-            f"（保留近 {retention.RETENTION_DAYS} 天供周榜/月榜）"
-        )
-    except ActionFailed:
-        raise
-    except Exception as e:
-        logger.exception(f"周聚合失败: {e}")
-        await aggregate_cmd.finish(f"周聚合失败：{e}")

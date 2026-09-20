@@ -7,20 +7,26 @@
 from datetime import date
 
 from sqlalchemy import select
+from sqlalchemy.orm import Session
 
 from ..db import get_session
 from ..models.daily_record import DailyRecord
 
 
-def compute_member_summary(qq: str, start: date, end: date) -> dict:
+def compute_member_summary(
+    qq: str, start: date, end: date, session: Session | None = None
+) -> dict:
     """聚合 [start, end) 区间某成员的全部 daily_record（任一平台/截图）。
 
-    内部自开 session（阻塞 DB 调用），供 asyncio.to_thread 直接执行。返回 dict：
-    active_days / activities / distance_km / ascent_meters / active_minutes / calories /
-    training_load / max_activity_distance_km / avg_pace_sec_per_km / avg_hr。
+    默认内部自开 session（阻塞 DB 调用），供 asyncio.to_thread 直接执行；测试可
+    传入 session 注入临时库。返回 dict：active_days / activities / distance_km /
+    ascent_meters / active_minutes / calories / training_load /
+    max_activity_distance_km / avg_pace_sec_per_km / avg_hr。
     平均配速按距离加权、平均心率按时长加权；无任何数据时各项为 0 / 空。
     """
-    session = get_session()
+    own_session = session is None
+    if own_session:
+        session = get_session()
     try:
         rows = (
             session.execute(
@@ -34,7 +40,8 @@ def compute_member_summary(qq: str, start: date, end: date) -> dict:
             .all()
         )
     finally:
-        session.close()
+        if own_session:
+            session.close()
 
     active_days = 0
     activities = 0

@@ -458,3 +458,72 @@ def detect_page_kind(text: str) -> str:
         score += 1
 
     return "summary" if score >= 3 else "activity"
+
+
+# ---------------------------------------------------------------------------
+# 识别结果合理性校验（落库前的最后一道防线）
+# ---------------------------------------------------------------------------
+
+# 单次运动各字段的合理范围（跑步口径）。OCR 偶发把步数 / 卡路里 / 统计页总量
+# 误识别成某字段，超范围的值视为识别错误。距离是核心指标，超上限整体拒绝；
+# 其余字段各自校验，超范围仅丢弃该字段。
+_VALID_RANGES = {
+    "distance_km": (0.05, 100.0),       # 单次 50 米 ~ 100 公里（百公里越野上限）
+    "avg_pace_sec_per_km": (120, 900),  # 2:00 ~ 15:00 /km
+    "avg_hr": (40, 220),                # bpm
+    "active_minutes": (1, 1440),        # 1 分钟 ~ 24 小时
+    "calories": (0, 20000),             # 千卡（百公里越野可上万）
+    "ascent_meters": (0, 10000),        # 米
+    "steps": (0, 200000),               # 步（百公里约 12 万步）
+    "sleep_hours": (0, 24),             # 小时
+}
+
+# 距离 + 时长交叉校验的速度上限（km/h），超过即「距离/时长」至少一个识别错。
+_MAX_SPEED_KMH = 30.0
+
+
+def sanitize_activity(data: dict) -> tuple[dict, str | None]:
+    """对 OCR 识别结果做合理性校验，返回 ``(清洗后的数据, 拒绝原因或 None)``。
+
+    距离是核心指标：
+      - 超出单次运动合理范围上限（如把月汇总总量 / 步数当成距离）→ 整体拒绝；
+      - 距离与时长推出的速度超出人类跑步极限 → 整体拒绝；
+      - 距离过小 / 为零 → 仅丢弃该字段（可能是纯步数/心率截图），其余字段照常。
+    其余字段超范围仅丢弃该字段，不拖累整张截图。
+    """
+    if not data:
+        return {}, None
+
+    cleaned = dict(data)
+    reject: str | None = None
+
+    dist = cleaned.get("distance_km")
+    if dist is not None:
+        lo, hi = _VALID_RANGES["distance_km"]
+        if dist > hi:
+            reject = (
+                f"识别出的距离 {dist:g} km 超出单次运动合理范围上限 {hi:g} km，疑似识别错误"
+            )
+        elif dist < lo:
+            # 距离过小/为零：丢弃该字段，其余字段照常（不整体拒绝）
+            cleaned.pop("distance_km", None)
+            dist = None
+
+    # 交叉校验：距离与时长同时存在时，速度不能超过人类跑步极限
+    if reject is None and dist is not None and cleaned.get("active_minutes"):
+        speed_kmh = dist / (cleaned["active_minutes"] / 60.0)
+        if speed_kmh > _MAX_SPEED_KMH:
+            reject = (
+                f"距离 {dist:g} km 与时长 {cleaned['active_minutes']} 分钟推出的速度"
+                f" {speed_kmh:.1f} km/h 超出跑步极限，疑似距离或时长识别错误"
+            )
+
+    # 其余字段超范围仅丢弃
+    for key, (lo, hi) in _VALID_RANGES.items():
+        if key == "distance_km":
+            continue
+        v = cleaned.get(key)
+        if v is not None and not (lo <= v <= hi):
+            cleaned.pop(key, None)
+
+    return cleaned, reject

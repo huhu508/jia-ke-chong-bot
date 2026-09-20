@@ -11,6 +11,7 @@ from urllib.parse import parse_qs, urlencode, urlparse
 
 import httpx
 
+from .. import crypto
 from .base import DailyStats, SportProvider
 
 
@@ -383,16 +384,20 @@ class CorosProvider(SportProvider):
             break
         return stats
 
+    # 跑步类运动类型编码（COROS 官方 SPORT_NAMES 映射）：100=跑步 102=越野跑 103=场地跑
+    _RUNNING_SPORT_TYPES = {100, 102, 103}
+
     @staticmethod
     def _parse_sport_records(text: str) -> dict:
-        """从运动记录文本提取聚合指标。
+        """从运动记录文本提取聚合指标（只统计跑步）。
 
-        真实格式（每条记录）：
+        真实格式（每条记录三行，记录间以空行分隔）：
             Duration: 40:17 | Distance: 8.00 km
             Average Pace: 5:02 /km | Avg HR: 160 bpm | Calories: 598 kcal
             LabelId: 4803... | SportType: 100
-        返回 dict：total_distance_km / count / max_distance_km /
-        avg_pace_sec_per_km / avg_hr / activities[(label_id, sport_type)]。
+        按「LabelId | SportType」行收尾每条记录，只统计跑步（100/102/103），
+        游泳/骑行/徒步等一律跳过。返回 dict：total_distance_km / count /
+        max_distance_km / avg_pace_sec_per_km / avg_hr / activities[(label_id, sport_type)]。
         """
         empty = {
             "total_distance_km": 0.0,
@@ -405,34 +410,62 @@ class CorosProvider(SportProvider):
         if not text:
             return empty
 
-        count = 0
-        m = re.search(r"\((\d+)\s+records?\)", text)
-        if m:
-            count = int(m.group(1))
+        recs = []        # 跑步记录 {dur, km, hr, pace}
+        activities = []  # 跑步记录的 (label_id, sport_type)
+        cur: dict = {}   # 当前记录累积字段
 
-        # 时长 + 距离（同一条记录同一行）
-        recs = []
-        for m in re.finditer(
-            r"Duration:\s*(\d+):(\d{1,2})(?::(\d{1,2}))?\s*\|\s*Distance:\s*([\d.]+)\s*(km|m)\b",
-            text,
-        ):
-            if m.group(3):
-                dur = int(m.group(1)) * 3600 + int(m.group(2)) * 60 + int(m.group(3))
-            else:
-                dur = int(m.group(1)) * 60 + int(m.group(2))
-            km = float(m.group(4))
-            if m.group(5) == "m":
-                km /= 1000.0
-            recs.append({"dur": dur, "km": km, "hr": 0, "pace": 0.0})
+        def flush() -> None:
+            nonlocal cur
+            if cur.get("sport_type") in CorosProvider._RUNNING_SPORT_TYPES and cur.get("km") is not None:
+                recs.append(
+                    {
+                        "dur": cur.get("dur", 0),
+                        "km": cur["km"],
+                        "hr": cur.get("hr", 0),
+                        "pace": cur.get("pace", 0.0),
+                    }
+                )
+                activities.append((cur.get("label_id", ""), cur["sport_type"]))
+            cur = {}
 
-        # 配速 / 心率与上面同序（每条记录一条），按索引对齐
-        paces = re.findall(r"Average Pace:\s*(\d+):(\d{1,2})\s*/km", text)
-        hrs = re.findall(r"Avg HR:\s*(\d+)\s*bpm", text)
-        for i, rec in enumerate(recs):
-            if i < len(paces):
-                rec["pace"] = int(paces[i][0]) * 60 + int(paces[i][1])
-            if i < len(hrs):
-                rec["hr"] = int(hrs[i])
+        for line in text.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+
+            # Duration + Distance（同一行）
+            m = re.search(
+                r"Duration:\s*(\d+):(\d{1,2})(?::(\d{1,2}))?\s*\|\s*Distance:\s*([\d.]+)\s*(km|m)\b",
+                line,
+            )
+            if m:
+                if m.group(3):
+                    cur["dur"] = int(m.group(1)) * 3600 + int(m.group(2)) * 60 + int(m.group(3))
+                else:
+                    cur["dur"] = int(m.group(1)) * 60 + int(m.group(2))
+                km = float(m.group(4))
+                if m.group(5) == "m":
+                    km /= 1000.0
+                cur["km"] = km
+
+            # Average Pace（与 Avg HR 常在同一行，故这里不能 continue）
+            m = re.search(r"Average Pace:\s*(\d+):(\d{1,2})\s*/km", line)
+            if m:
+                cur["pace"] = int(m.group(1)) * 60 + int(m.group(2))
+
+            # Avg HR
+            m = re.search(r"Avg HR:\s*(\d+)\s*bpm", line)
+            if m:
+                cur["hr"] = int(m.group(1))
+
+            # LabelId + SportType：一条记录的结尾标记，收尾上一条
+            m = re.search(r"LabelId:\s*(\d+)\s*\|\s*SportType:\s*(\d+)", line)
+            if m:
+                cur["label_id"] = m.group(1)
+                cur["sport_type"] = int(m.group(2))
+                flush()
+
+        flush()
 
         total_km = round(sum(r["km"] for r in recs), 2)
         total_dur = sum(r["dur"] for r in recs)
@@ -444,11 +477,11 @@ class CorosProvider(SportProvider):
 
         return {
             "total_distance_km": total_km,
-            "count": count,
+            "count": len(recs),  # 只计跑步条数，游泳/骑行不计入「运动次数」
             "max_distance_km": round(max((r["km"] for r in recs), default=0.0), 2),
             "avg_pace_sec_per_km": avg_pace,
             "avg_hr": avg_hr,
-            "activities": re.findall(r"LabelId:\s*(\d+)\s*\|\s*SportType:\s*(\d+)", text),
+            "activities": activities,
         }
 
     @staticmethod
@@ -484,11 +517,14 @@ class CorosProvider(SportProvider):
         if not path.exists():
             return None
         try:
-            return json.loads(path.read_text(encoding="utf-8"))
+            raw = json.loads(path.read_text(encoding="utf-8"))
         except (json.JSONDecodeError, OSError):
             return None
+        return crypto.decrypt_json(raw)
 
     @staticmethod
     def _save_json(path: Path, data: dict) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        path.write_text(
+            json.dumps(crypto.encrypt_json(data), ensure_ascii=False, indent=2), encoding="utf-8"
+        )

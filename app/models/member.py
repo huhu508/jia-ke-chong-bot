@@ -15,6 +15,6 @@ class Member(Base):
     nickname: Mapped[str] = mapped_column(String(64), default="")
     # 绑定的运动平台：garmin / coros（其余平台无开放接口，靠截图，不进此字段）
     platform: Mapped[str] = mapped_column(String(16), default="")
-    # 平台账号标识（当前单账号模式，凭据存 .env，此字段留空备用）
+    # 平台账号标识（凭据按 QQ 存 data/accounts/<platform>_<qq>.json，Fernet 加密落盘；此字段留空备用）
     platform_account: Mapped[str] = mapped_column(String(128), default="")
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())

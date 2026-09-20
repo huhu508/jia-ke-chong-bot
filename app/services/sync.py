@@ -61,7 +61,9 @@ def sync_daily(qq: str, platform: str, d: date) -> DailyStats:
         session.close()
 
 
-def record_manual_activity(member: Member, d: date, data: dict, session: Session) -> DailyRecord:
+def record_manual_activity(
+    member: Member, d: date, stats: DailyStats, session: Session
+) -> DailyRecord:
     """把一张截图识别到的**单次运动**累加进当日明细（platform="manual"）。
 
     与平台接口不同，截图一次代表一次运动，因此：
@@ -69,6 +71,7 @@ def record_manual_activity(member: Member, d: date, data: dict, session: Session
       - max_activity_distance_km 取历史与本次的**较大值**；
       - avg_pace/avg_hr 简单以本次覆盖（无更细数据可加权）。
     供每日排行把「未绑定平台、靠截图记录」的成员也纳入统计。
+    入参 stats 为统一 DailyStats（调用方从 parsers 结果构造），与平台接口同形。
     为阻塞调用，需在 asyncio.to_thread 中执行。
     """
     rec = session.execute(
@@ -82,20 +85,18 @@ def record_manual_activity(member: Member, d: date, data: dict, session: Session
         rec = DailyRecord(member_qq=member.qq, record_date=d, platform="manual")
         session.add(rec)
 
-    distance = float(data.get("distance_km") or 0.0)
+    distance = stats.distance_km
     # 新建的 DailyRecord 尚未 flush，各列仍是 None（default=0.0 只在 INSERT 时生效），
     # 因此累加前必须用 `or 0` 兜底，否则 None + float 会抛 TypeError。
     rec.distance_km = round((rec.distance_km or 0.0) + distance, 2)
-    rec.ascent_meters = round(
-        (rec.ascent_meters or 0.0) + float(data.get("ascent_meters") or 0.0), 2
-    )
-    rec.calories = (rec.calories or 0) + int(data.get("calories") or 0)
-    rec.active_minutes = (rec.active_minutes or 0) + int(data.get("active_minutes") or 0)
+    rec.ascent_meters = round((rec.ascent_meters or 0.0) + stats.ascent_meters, 2)
+    rec.calories = (rec.calories or 0) + stats.calories
+    rec.active_minutes = (rec.active_minutes or 0) + stats.active_minutes
     rec.max_activity_distance_km = round(max(rec.max_activity_distance_km or 0.0, distance), 2)
-    if data.get("avg_pace_sec_per_km"):
-        rec.avg_pace_sec_per_km = float(data["avg_pace_sec_per_km"])
-    if data.get("avg_hr"):
-        rec.avg_hr = int(data["avg_hr"])
+    if stats.avg_pace_sec_per_km:
+        rec.avg_pace_sec_per_km = stats.avg_pace_sec_per_km
+    if stats.avg_hr:
+        rec.avg_hr = stats.avg_hr
     rec.activities_count = (rec.activities_count or 0) + 1
     session.commit()
     return rec

@@ -16,6 +16,13 @@ class GarminProvider(SportProvider):
 
     name = "garmin"
 
+    # 跑步类活动的 typeKey 白名单；游泳/骑行/力量等一律不统计（群里反馈游泳数据混入跑步）
+    _RUNNING_TYPE_KEYS = {
+        "running", "run", "trail_running", "trail_run",
+        "track_running", "track_run", "treadmill_running", "treadmill_run",
+        "indoor_running", "indoor_run", "virtual_run",
+    }
+
     def __init__(self, is_cn: bool = True):
         self._is_cn = is_cn
 
@@ -84,6 +91,17 @@ class GarminProvider(SportProvider):
         return stats
 
     @staticmethod
+    def _is_running_activity(a) -> bool:
+        """判断一条 Garmin 活动是否为跑步（按 activityType.typeKey 白名单）。
+
+        typeKey 缺失（罕见）时按「无法确认是跑步」跳过，宁可少算也不把游泳/骑行混入。
+        """
+        at = a.get("activityType") if isinstance(a, dict) else None
+        if not isinstance(at, dict):
+            return False
+        return str(at.get("typeKey") or "").lower() in GarminProvider._RUNNING_TYPE_KEYS
+
+    @staticmethod
     def _apply_activity_metrics(stats: DailyStats, acts) -> None:
         """从当日活动列表聚合运动指标（距离/时长/消耗/爬升/配速/心率/负荷）。
 
@@ -106,12 +124,14 @@ class GarminProvider(SportProvider):
         if isinstance(acts, dict):
             acts = acts.get("activityList", []) or []
 
-        # 当日运动次数（活动列表条目数），供「周数据/月数据」的「运动次数」字段
-        stats.activities_count = len(acts)
+        running_count = 0
 
         for a in acts or []:
             if not isinstance(a, dict):
                 continue
+            if not GarminProvider._is_running_activity(a):
+                continue  # 只统计跑步，游泳/骑行/力量等一律跳过
+            running_count += 1
             try:
                 dist_m = float(a.get("distance") or 0)
                 dist_km = dist_m / 1000.0
@@ -135,6 +155,8 @@ class GarminProvider(SportProvider):
             except (TypeError, ValueError):
                 continue
 
+        # 当日运动次数只计跑步（与下方各指标口径一致），供「周数据/月数据」的「运动次数」字段
+        stats.activities_count = running_count
         stats.distance_km = round(total_dist_km, 2)
         stats.active_minutes = int(total_duration_s // 60)
         stats.calories = int(total_calories)
