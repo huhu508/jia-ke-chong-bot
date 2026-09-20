@@ -52,7 +52,7 @@ def test_record_manual_activity_accumulates(db_session):
     db_session.add(m)
     db_session.commit()
 
-    d = date(2026, 9, 20)
+    d = date.today()
     record_manual_activity(
         m,
         d,
@@ -92,7 +92,7 @@ def test_undo_last_checkin_reverts_last(db_session):
     db_session.add(m)
     db_session.commit()
 
-    d = date(2026, 9, 20)
+    d = date.today()
     # 两次截图打卡
     add_manual_distance(m, 5.0, db_session)
     record_manual_activity(m, d, DailyStats(date=d, distance_km=5.0), db_session)
@@ -131,7 +131,7 @@ def test_undo_last_checkin_removes_record_when_zero(db_session):
     db_session.add(m)
     db_session.commit()
 
-    d = date(2026, 9, 20)
+    d = date.today()
     add_manual_distance(m, 5.0, db_session)
     record_manual_activity(m, d, DailyStats(date=d, distance_km=5.0), db_session)
     log_checkin("111", d, 5.0, db_session)
