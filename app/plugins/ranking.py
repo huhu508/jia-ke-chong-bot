@@ -31,7 +31,7 @@ async def build_ranking(scope: str = "day") -> str:
     if scope == "month":
         start = today.replace(day=1)
         r = await asyncio.to_thread(ranking.compute_range_rankings, start, today + timedelta(days=1), scope="month")
-        return ranking.format_leaderboards(r, ranking.monthly_title(today))
+        return ranking.format_leaderboards(r, ranking.monthly_title(today), with_active_days=True)
     r = await asyncio.to_thread(ranking.compute_range_rankings, today, today + timedelta(days=1), scope="day")
     return ranking.format_leaderboards(r, ranking.daily_title(today))
 

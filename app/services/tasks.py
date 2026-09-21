@@ -16,7 +16,8 @@ from sqlalchemy import select
 from ..config import settings
 from ..db import get_session
 from ..models.group import Group
-from . import ranking, retention, sync, timeutil
+from ..models.member import Member
+from . import checkin, ranking, retention, sync, timeutil
 
 driver = get_driver()
 
@@ -26,6 +27,27 @@ def _discover_groups() -> list[int]:
     session = get_session()
     try:
         return [int(g.group_id) for g in session.execute(select(Group)).scalars().all()]
+    finally:
+        session.close()
+
+
+def _lottery_if_due() -> tuple[int, list[str]] | None:
+    """全群累计打卡突破抽奖阈值时开奖，返回 (阈值, 中奖者昵称列表)；否则 None。
+
+    状态表（lottery:<阈值>）保证只触发一次。阻塞 DB 调用，放线程执行。
+    """
+    session = get_session()
+    try:
+        t = checkin.check_lottery(session)
+        if t is None:
+            return None
+        winners = checkin.draw_lottery(session)
+        names = []
+        for w in winners:
+            m = session.get(Member, w)
+            names.append(m.display_name if m else w)
+        session.commit()
+        return t, names
     finally:
         session.close()
 
@@ -108,6 +130,26 @@ async def _run_broadcast() -> None:
                     logger.info(f"已向群 {gid} 播报一段排行")
                 except Exception as e:
                     logger.warning(f"向群 {gid} 播报失败: {e}")
+
+    # 群抽奖兜底：全群累计打卡突破阈值时开奖，公告到所有播报群（状态表保证只触发一次）
+    try:
+        lot = await asyncio.to_thread(_lottery_if_due)
+    except Exception as e:
+        logger.warning(f"群抽奖检查失败: {e}")
+        lot = None
+    if lot:
+        t, winners = lot
+        text = (
+            f"🎉 全群累计打卡突破 {t} 天！群抽奖开奖：{'、'.join(winners)} "
+            f"获得{checkin.LOTTERY_PRIZE}～恭喜这位跑友！"
+        )
+        for bot in bots:
+            for gid in groups:
+                try:
+                    await bot.send_group_msg(group_id=gid, message=text)
+                    logger.info(f"已向群 {gid} 发送群抽奖公告")
+                except Exception as e:
+                    logger.warning(f"向群 {gid} 发送群抽奖公告失败: {e}")
 
 
 def _rank_title(label: str, start: datetime.date, end: datetime.date) -> str:

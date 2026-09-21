@@ -10,7 +10,7 @@ from sqlalchemy import select
 from ..db import get_session
 from ..models.daily_record import DailyRecord
 from ..models.member import Member
-from ..services import sync, timeutil
+from ..services import checkin, llm, sync, timeutil
 from ..services.cheers import format_pace
 from ..services.providers.base import DailyStats
 
@@ -81,6 +81,40 @@ def _format_manual(name: str, d: date, rec, total_km: float) -> str:
     return head + "\n".join(lines)
 
 
+def _checkin_badge(qq: str) -> str:
+    """生成「本学期第 x 次打卡」一行。用独立 session 读，避免与 sync_daily 的
+    跨 session 快照不一致（SQLite WAL 下长事务快照冻结，读不到刚提交的打卡日）。"""
+    s = get_session()
+    try:
+        return f"🎓 本学期第 {checkin.total_days(qq, s)} 次打卡"
+    finally:
+        s.close()
+
+
+async def _milestone_cheers(qq: str, nickname: str) -> str:
+    """若本次查询正好跨过打卡里程碑，返回 AI 祝贺彩蛋；否则空串。
+
+    幂等由 CheckinState 保证——截图路径已触发过的里程碑此处不再重复（返回空）。
+    """
+    s = get_session()
+    ms: list[int] = []
+    try:
+        ms = checkin.crossed_milestones(qq, checkin.total_days(qq, s), s)
+        if ms:
+            s.commit()
+    except Exception as e:
+        logger.exception(f"打卡里程碑检测失败: {e}")
+    finally:
+        s.close()
+    if not ms:
+        return ""
+    parts = []
+    for m in ms:
+        cheer = await asyncio.to_thread(llm.milestone_cheer, nickname, m)
+        parts.append(cheer or f"🎉 达成第 {m} 次打卡里程碑，坚持就是胜利！")
+    return "\n\n" + "\n".join(parts)
+
+
 async def build_today(qq: str, nickname: str) -> str:
     """构建「今日」查询结果文本（命令 handler 与自然语言路由共用，不直接 finish）。
 
@@ -96,7 +130,10 @@ async def build_today(qq: str, nickname: str) -> str:
         # 已绑定平台 → 走平台接口同步
         if member is not None and member.platform:
             stats = await asyncio.to_thread(sync.sync_daily, member.qq, member.platform, today)
-            return f"{nickname} 今日运动数据：\n{_format_stats(stats)}"
+            text = f"{nickname} 今日运动数据：\n{_format_stats(stats)}"
+            text += f"\n\n{_checkin_badge(qq)}"
+            text += await _milestone_cheers(qq, nickname)
+            return text
 
         # 未绑定 → 读截图记录（当日明细 + 累计里程）
         rec = session.execute(
@@ -116,7 +153,10 @@ async def build_today(qq: str, nickname: str) -> str:
                 "绑定后发「今日」即可查询当日数据"
             )
 
-        return _format_manual(nickname, today, rec, total)
+        text = _format_manual(nickname, today, rec, total)
+        text += f"\n\n{_checkin_badge(qq)}"
+        text += await _milestone_cheers(qq, nickname)
+        return text
     finally:
         session.close()
 

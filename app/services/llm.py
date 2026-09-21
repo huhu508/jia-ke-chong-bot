@@ -275,6 +275,38 @@ def comment_checkin(name: str, data: dict) -> str | None:
     )
 
 
+def milestone_cheer(name: str, days: int) -> str | None:
+    """针对打卡里程碑（第 days 天）生成一句祝贺彩蛋；失败返回 None（调用方降级模板）。"""
+    system_prompt = _system(
+        "群友刚达成一个打卡里程碑（累计第 N 天运动打卡），请用「甲壳虫」的口吻送上一句"
+        "走心的祝贺 + 鼓励，点出坚持的意义但不说教。一句话，40 字以内，纯文本。"
+    )
+    return _chat(
+        [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": f"{name} 今天达成了第 {days} 次运动打卡里程碑，请祝贺并鼓励一句。"},
+        ],
+        max_tokens=200,
+        timeout=20.0,
+    )
+
+
+def festival_cheer(name: str, festival: str, distance_km: float) -> str | None:
+    """针对节日 + 特殊距离打卡生成一句庆祝彩蛋；失败返回 None（调用方降级模板）。"""
+    system_prompt = _system(
+        f"今天是{festival}，群友 {name} 打卡了 {distance_km} km。请用「甲壳虫」的口吻写一句"
+        f"庆祝{festival}、并鼓励跑友的话。一句话，40 字以内，纯文本，说人话。"
+    )
+    return _chat(
+        [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": f"{name} 在{festival}这天打卡 {distance_km} km，请庆祝并鼓励。"},
+        ],
+        max_tokens=200,
+        timeout=20.0,
+    )
+
+
 def advise(name: str, period: str, s: dict) -> str | None:
     """根据周期汇总给训练建议；失败返回 None（由调用方降级）。"""
     system_prompt = _system(

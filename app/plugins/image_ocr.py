@@ -19,7 +19,7 @@ from PIL import Image
 
 from ..db import get_session
 from ..models.member import Member
-from ..services import cheers, llm, parsers, sync, timeutil
+from ..services import checkin, cheers, llm, parsers, sync, timeutil
 from ..services.member import get_or_create_member
 from ..services.ocr import recognize_boxes
 from ..services.providers.base import DailyStats
@@ -250,6 +250,10 @@ async def handle_image(bot: Bot, event: MessageEvent):
 
     # 写库：SQLite 写入极快，直接在事件循环内同步执行，避免把同一个 session 传进
     # asyncio.to_thread（不同线程共享 Session 违反 SQLAlchemy 线程安全约定）。
+    milestone_hits: list[int] = []
+    fest = None
+    festival_km = 0.0
+    lottery_result: tuple[int, list[str]] | None = None
     session = get_session()
     try:
         member = get_or_create_member(session, qq, name)
@@ -257,13 +261,29 @@ async def handle_image(bot: Bot, event: MessageEvent):
         total = sync.add_manual_distance(member, data["distance_km"], session)
         # 截图记录也进当日明细，让未绑定成员出现在每日排行里。
         # parsers 返回 dict，统一转成 DailyStats（过滤非模型字段，防御未来新增键）。
+        today_d = timeutil.today()
         stats = DailyStats(
-            date=timeutil.today(),
+            date=today_d,
             **{k: v for k, v in data.items() if k in DailyStats.model_fields},
         )
-        sync.record_manual_activity(member, timeutil.today(), stats, session)
-        sync.log_checkin(qq, timeutil.today(), data["distance_km"], session)
+        sync.record_manual_activity(member, today_d, stats, session)
+        sync.log_checkin(qq, today_d, data["distance_km"], session)
         _mark_seen(qq, img_md5)
+
+        # 打卡彩蛋：里程碑 / 节日+特殊距离 / 群抽奖（幂等，状态表保证只触发一次）
+        checkin_total = checkin.total_days(qq, session)
+        milestone_hits = checkin.crossed_milestones(qq, checkin_total, session)
+        fest = checkin.match_festival(today_d, data.get("distance_km", 0.0))
+        festival_km = data.get("distance_km", 0.0)
+        lt = checkin.check_lottery(session)
+        if lt is not None:
+            winners = checkin.draw_lottery(session)
+            winner_names = []
+            for w in winners:
+                m = session.get(Member, w)
+                winner_names.append(m.display_name if m else w)
+            lottery_result = (lt, winner_names)
+        session.commit()
     except Exception as e:
         logger.exception(f"[图片识别] qq={qq} 记录失败: {e}")
         await image_matcher.finish(f"记录失败，请稍后重试：{e}")
@@ -274,8 +294,32 @@ async def handle_image(bot: Bot, event: MessageEvent):
         _format_cheer(data)
         + f"\n\n✅ 已记入今日数据：本次 +{data['distance_km']} km，累计 {total} km，发「今日」即可查看"
     )
+    # 里程碑彩蛋：AI 一句祝贺，失败降级模板
+    for m in milestone_hits:
+        cheer = await asyncio.to_thread(llm.milestone_cheer, name, m)
+        reply += f"\n\n🎉 {cheer or f'达成第 {m} 次打卡里程碑，坚持就是胜利！'}"
+    # 节日+特殊距离彩蛋
+    if fest is not None:
+        fallback = f"{fest['name']}快乐！{festival_km} km 跑得漂亮，继续加油～"
+        cheer = await asyncio.to_thread(llm.festival_cheer, name, fest["name"], festival_km)
+        reply += f"\n\n🎊 {cheer or fallback}"
     # 大模型补一句点评：失败返回 None，自动降级为纯数据回显，不影响主链路
     comment = await asyncio.to_thread(llm.comment_checkin, name, data)
     if comment:
         reply += f"\n\n💬 {comment}"
+
+    # 群抽奖开奖：公告到当前群（状态表保证只触发一次）
+    if lottery_result is not None:
+        lt, winners = lottery_result
+        announce = (
+            f"🎉 全群累计打卡突破 {lt} 天！群抽奖开奖：{'、'.join(winners)} 获得{checkin.LOTTERY_PRIZE}～"
+            f"恭喜这位跑友！"
+        )
+        gid = getattr(event, "group_id", None)
+        if gid is not None:
+            try:
+                await bot.send_group_msg(group_id=gid, message=announce)
+            except Exception as e:
+                logger.warning(f"群抽奖公告发送失败: {e}")
+
     await image_matcher.finish(reply)

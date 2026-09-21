@@ -12,7 +12,7 @@ from ..models.manual_distance import ManualDistance
 from ..models.member import Member
 from .providers import get_provider
 from .providers.base import DailyStats
-from . import timeutil
+from . import checkin, timeutil
 
 
 def _write_record(
@@ -43,6 +43,7 @@ def _write_record(
     rec.avg_hr = stats.avg_hr
     rec.max_activity_distance_km = stats.max_activity_distance_km
     rec.raw_json = json.dumps(stats.raw or {}, ensure_ascii=False)
+    checkin.ensure_day(qq, d, session)
     session.commit()
     return stats
 
@@ -100,6 +101,7 @@ def record_manual_activity(
     if stats.avg_hr:
         rec.avg_hr = stats.avg_hr
     rec.activities_count = (rec.activities_count or 0) + 1
+    checkin.ensure_day(member.qq, d, session)
     session.commit()
     return rec
 

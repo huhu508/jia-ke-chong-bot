@@ -53,6 +53,7 @@ def compute_range_rankings(
         distance = defaultdict(float)
         ascent = defaultdict(float)
         max_single = defaultdict(float)
+        active_days: dict[str, set] = defaultdict(set)
         nicknames: dict[str, str] = {}
 
         for rec, member in rows:
@@ -61,6 +62,9 @@ def compute_range_rankings(
             distance[qq] += rec.distance_km or 0.0
             ascent[qq] += rec.ascent_meters or 0.0
             max_single[qq] = max(max_single[qq], rec.max_activity_distance_km or 0.0)
+            # 运动天数：同一天只要「有数据」就记 1 天（口径同 summary.py），用 set 按日期去重
+            if (rec.distance_km or 0.0) > 0 or (rec.active_minutes or 0) > 0 or (rec.calories or 0) > 0:
+                active_days[qq].add(rec.record_date)
 
         # 周榜：未绑定成员的距离榜改用「本周累计」（ManualDistance 只存未绑定成员的累加值，
         # 绑定时会被 clear_member_records 清空，故这里取到的必是当前未绑定成员）。
@@ -93,6 +97,7 @@ def compute_range_rankings(
             "distance": _rank(distance),
             "ascent": _rank(ascent),
             "max_single": _rank(max_single),
+            "active_days": _rank({qq: len(ds) for qq, ds in active_days.items()}),
         }
     finally:
         if own_session:
@@ -122,12 +127,19 @@ def monthly_title(d: date) -> str:
     return f"🏆 本月运动排行（{d.month}月）"
 
 
-def format_leaderboards(rankings: dict, title: str) -> str:
-    """把三榜渲染为消息文本；title 为完整标题（如「🏆 今日运动排行（9月17日）」）。"""
-    return (
-        f"{title}\n"
-        "━━━━━━━━━━━━\n"
-        f"📏 运动距离排行\n{_fmt_rank(rankings.get('distance', []), 'km', '{:.2f}')}\n\n"
-        f"⛰️ 爬升排行\n{_fmt_rank(rankings.get('ascent', []), 'm', '{:.0f}')}\n\n"
-        f"🚀 单次运动距离排行\n{_fmt_rank(rankings.get('max_single', []), 'km', '{:.2f}')}"
-    )
+def format_leaderboards(rankings: dict, title: str, with_active_days: bool = False) -> str:
+    """把三榜渲染为消息文本；title 为完整标题（如「🏆 今日运动排行（9月17日）」）。
+
+    with_active_days=True 时末尾追加「运动天数排行」（仅月榜有意义——日榜天数退化为 0/1，
+    周榜最多 7，均无排行价值）。
+    """
+    parts = [
+        f"{title}\n",
+        "━━━━━━━━━━━━\n",
+        f"📏 运动距离排行\n{_fmt_rank(rankings.get('distance', []), 'km', '{:.2f}')}\n\n",
+        f"⛰️ 爬升排行\n{_fmt_rank(rankings.get('ascent', []), 'm', '{:.0f}')}\n\n",
+        f"🚀 单次运动距离排行\n{_fmt_rank(rankings.get('max_single', []), 'km', '{:.2f}')}",
+    ]
+    if with_active_days:
+        parts.append(f"\n\n📅 运动天数排行\n{_fmt_rank(rankings.get('active_days', []), '天', '{:.0f}')}")
+    return "".join(parts)
