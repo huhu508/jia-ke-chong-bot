@@ -11,6 +11,7 @@
 """
 
 import random
+from collections import Counter
 from datetime import date
 
 from sqlalchemy import func, select
@@ -98,6 +99,31 @@ def global_total(session: Session) -> int:
     return session.scalar(select(func.count()).select_from(CheckinDay)) or 0
 
 
+def _milestone_key(m: int, qq: str) -> str:
+    """里程碑触发状态 key：milestone:<天数>:<qq>。"""
+    return f"milestone:{m}:{qq}"
+
+
+def _lottery_key(t: int) -> str:
+    """群抽奖触发状态 key：lottery:<阈值>。"""
+    return f"lottery:{t}"
+
+
+def _gift_prefix() -> str:
+    """礼物状态 key 前缀：gift:<天数>:（用于按前缀统计已领取人数）。"""
+    return f"gift:{GIFT_DAYS}:"
+
+
+def _gift_key(qq: str) -> str:
+    """礼物领取状态 key：gift:<天数>:<qq>。"""
+    return _gift_prefix() + qq
+
+
+def _festival_key(name: str, year: int, qq: str) -> str:
+    """节日彩蛋触发状态 key：festival:<节日名>:<年份>:<qq>。"""
+    return f"festival:{name}:{year}:{qq}"
+
+
 def _mark_state(key: str, session: Session) -> bool:
     """写一条触发状态（幂等），返回是否为首次写入。"""
     if session.get(CheckinState, key) is not None:
@@ -110,7 +136,7 @@ def crossed_milestones(qq: str, total: int, session: Session) -> list[int]:
     """返回本次新跨越的里程碑值列表（可能一次跨多个，如回填后跳级）。"""
     hit = []
     for m in sorted(MILESTONES):
-        if total >= m and _mark_state(f"milestone:{m}:{qq}", session):
+        if total >= m and _mark_state(_milestone_key(m, qq), session):
             hit.append(m)
     return hit
 
@@ -119,22 +145,24 @@ def check_lottery(session: Session) -> int | None:
     """若全群累计打卡突破某个抽奖阈值，写状态并返回该阈值；否则 None。"""
     total = global_total(session)
     for t in sorted(LOTTERY_THRESHOLDS):
-        if total >= t and _mark_state(f"lottery:{t}", session):
+        if total >= t and _mark_state(_lottery_key(t), session):
             return t
     return None
 
 
 def draw_lottery(session: Session) -> list[str]:
-    """从所有打卡日中抽 LOTTERY_WINNERS 个中奖成员（每行=1 张票，多打卡多票）。
+    """从所有打卡日中抽 LOTTERY_WINNERS 个中奖成员，多打卡多票（按天数加权）。
 
-    random.sample 按行抽样（同一成员多天会占多行，权重自然更高），结果去重保序——
-    同一成员即使多行被抽中，也只中一次。
+    用 Counter 统计每个成员的打卡天数作为权重，random.sample 的 counts 参数按权重
+    无放回抽取，保证恰好抽满 LOTTERY_WINNERS 个不同成员（同一成员不重复中奖）。
     """
     rows = session.execute(select(CheckinDay.member_qq)).scalars().all()
     if not rows:
         return []
-    winners = random.sample(rows, min(LOTTERY_WINNERS, len(rows)))
-    return list(dict.fromkeys(winners))
+    weights = Counter(rows)  # qq -> 打卡天数（票数）
+    qqs = list(weights)
+    k = min(LOTTERY_WINNERS, len(qqs))
+    return random.sample(qqs, k, counts=[weights[q] for q in qqs])
 
 
 def match_festival(d: date, distance_km: float) -> dict | None:
@@ -154,7 +182,7 @@ def check_festival(qq: str, d: date, distance_km: float, session: Session) -> di
     fest = match_festival(d, distance_km)
     if fest is None:
         return None
-    if not _mark_state(f"festival:{fest['name']}:{d.year}:{qq}", session):
+    if not _mark_state(_festival_key(fest["name"], d.year, qq), session):
         return None
     return fest
 
@@ -165,7 +193,7 @@ def gift_claims(session: Session) -> int:
         session.scalar(
             select(func.count())
             .select_from(CheckinState)
-            .where(CheckinState.key.like(f"gift:{GIFT_DAYS}:%"))
+            .where(CheckinState.key.like(_gift_prefix() + "%"))
         )
         or 0
     )
@@ -173,7 +201,7 @@ def gift_claims(session: Session) -> int:
 
 def claim_gift(qq: str, session: Session) -> bool:
     """尝试领取第 GIFT_DAYS 天礼物（先到先得）。返回是否为首次领取。"""
-    return _mark_state(f"gift:{GIFT_DAYS}:{qq}", session)
+    return _mark_state(_gift_key(qq), session)
 
 
 def auto_gift(qq: str, total: int, session: Session) -> int | None:
@@ -184,7 +212,7 @@ def auto_gift(qq: str, total: int, session: Session) -> int | None:
     """
     if total < GIFT_DAYS:
         return None
-    if session.get(CheckinState, f"gift:{GIFT_DAYS}:{qq}") is not None:
+    if session.get(CheckinState, _gift_key(qq)) is not None:
         return None
     before = gift_claims(session)
     if before >= GIFT_QUOTA:

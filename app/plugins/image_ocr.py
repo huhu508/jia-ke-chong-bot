@@ -253,7 +253,6 @@ async def handle_image(bot: Bot, event: MessageEvent):
     # asyncio.to_thread（不同线程共享 Session 违反 SQLAlchemy 线程安全约定）。
     milestone_hits: list[int] = []
     fest = None
-    festival_km = 0.0
     gift_rank: int | None = None
     lottery_result: tuple[int, list[str]] | None = None
     session = get_session()
@@ -277,7 +276,6 @@ async def handle_image(bot: Bot, event: MessageEvent):
         milestone_hits = checkin.crossed_milestones(qq, checkin_total, session)
         gift_rank = checkin.auto_gift(qq, checkin_total, session)
         fest = checkin.check_festival(qq, today_d, data.get("distance_km", 0.0), session)
-        festival_km = data.get("distance_km", 0.0)
         lt = checkin.check_lottery(session)
         if lt is not None:
             winners = checkin.draw_lottery(session)
@@ -310,8 +308,9 @@ async def handle_image(bot: Bot, event: MessageEvent):
         await notify_gift_claim(bot, qq, name, gift_rank, getattr(event, "group_id", None))
     # 节日+特殊距离彩蛋
     if fest is not None:
-        fallback = f"{fest['name']}快乐！{festival_km} km 跑得漂亮，继续加油～"
-        cheer = await asyncio.to_thread(llm.festival_cheer, name, fest["name"], festival_km)
+        km = data["distance_km"]
+        fallback = f"{fest['name']}快乐！{km} km 跑得漂亮，继续加油～"
+        cheer = await asyncio.to_thread(llm.festival_cheer, name, fest["name"], km)
         reply += f"\n\n🎊 {cheer or fallback}"
     # 大模型补一句点评：失败返回 None，自动降级为纯数据回显，不影响主链路
     comment = await asyncio.to_thread(llm.comment_checkin, name, data)
