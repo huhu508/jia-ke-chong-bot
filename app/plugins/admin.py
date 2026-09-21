@@ -36,6 +36,10 @@ _PLATFORM_LABELS = {
 # 绑定/同步时回填平台历史的天数（覆盖周榜 7 天 + 月榜最多 31 天）
 BACKFILL_DAYS = 31
 
+# 私聊发送（群临时会话 / 好友私聊）：每通道重试次数、重试间隔（秒）
+_PRIVATE_RETRIES = 3
+_PRIVATE_RETRY_DELAY = 1.0
+
 
 def _is_superuser(event: MessageEvent) -> bool:
     superusers = get_driver().config.superusers
@@ -74,6 +78,37 @@ async def _backfill_async(qqs: list[str] | None = None) -> None:
             logger.warning(f"回填 {qq} 失败: {e}")
 
 
+async def _send_private_robust(
+    bot: Bot, user_id: int, group_id: int | None, message: str
+) -> bool:
+    """把消息送到对方私聊：优先群临时会话（带 group_id，无需加好友），失败退回好友私聊。
+
+    群临时会话与好友私聊对绑定而言效果一致——消息都落到同一个 QQ 的私聊会话，收件 QQ 号
+    不变，后续按 QQ 号绑定即可。NapCat 偶发超时（retcode=1200）但消息可能已发出，重试会
+    重复投递同一内容，对绑定链接无害。返回是否发送成功。
+    """
+    channels: list[dict] = []
+    if group_id is not None:
+        channels.append({"group_id": group_id})
+    channels.append({})
+
+    for idx, kwargs in enumerate(channels):
+        label = "群临时会话" if kwargs else "好友私聊"
+        for attempt in range(1, _PRIVATE_RETRIES + 1):
+            try:
+                await bot.send_private_msg(user_id=user_id, message=message, **kwargs)
+                return True
+            except Exception as e:
+                logger.warning(
+                    f"{label}发送失败（第 {attempt}/{_PRIVATE_RETRIES} 次，qq={user_id}）: {e}"
+                )
+                if attempt < _PRIVATE_RETRIES:
+                    await asyncio.sleep(_PRIVATE_RETRY_DELAY * attempt)
+        if idx == 0:
+            logger.info(f"群临时会话发送未成功，退回好友私聊（qq={user_id}）")
+    return False
+
+
 @bind_cmd.handle()
 async def handle_bind(bot: Bot, event: MessageEvent, args: Message = CommandArg()):
     platform = args.extract_plain_text().strip().lower()
@@ -87,7 +122,7 @@ async def handle_bind(bot: Bot, event: MessageEvent, args: Message = CommandArg(
 
     qq = event.get_user_id()
 
-    # COROS：发私密授权链接（私聊发送，不暴露在群里），无需管理员
+    # COROS：发私密授权链接（群临时会话优先，无需加好友，不暴露在群里），无需管理员
     if platform == "coros":
         provider = get_provider("coros")
         try:
@@ -95,26 +130,42 @@ async def handle_bind(bot: Bot, event: MessageEvent, args: Message = CommandArg(
         except Exception as e:
             logger.exception(f"发起 COROS 授权失败: {e}")
             await bind_cmd.finish(f"发起 COROS 授权失败：{e}")
-        # NapCat 私聊偶发超时（retcode=1200）但消息可能已发出：失败不阻断、不误报
-        try:
-            await bot.send_private_msg(
-                user_id=int(qq),
-                message="请在浏览器打开以下链接完成 COROS 授权（约 5 分钟内有效，不会顶掉手机 App）：\n"
-                f"{url}\n\n授权完成后，回群里发「绑定确认」完成绑定。",
+        group_id = getattr(event, "group_id", None)
+        sent = await _send_private_robust(
+            bot,
+            int(qq),
+            group_id,
+            "请在浏览器打开以下链接完成 COROS 授权（约 5 分钟内有效，不会顶掉手机 App）：\n"
+            f"{url}\n\n授权完成后，回群里发「绑定确认」完成绑定。",
+        )
+        if sent:
+            await bind_cmd.finish(
+                "已私聊你授权链接，请查收并完成授权后回群里发「绑定确认」；"
+                "若没收到私聊，请再发一次「绑定 coros」（无需加好友）"
             )
-        except Exception as e:
-            logger.warning(f"私聊发送授权链接异常（可能已发出）: {e}")
         await bind_cmd.finish(
-            "已私聊你授权链接，请查收并完成授权后回群里发「绑定确认」；"
-            "若没收到私聊，请先添加我为好友，再发一次「绑定 coros」（机器人私聊需互为好友）"
+            "私聊发送授权链接失败（临时会话偶发超时），请**先添加我为好友**后再发一次「绑定 coros」"
         )
 
-    # Garmin：无 OAuth，引导私聊发邮箱密码（私聊需先互为好友，否则消息到不了机器人）
-    await bind_cmd.finish(
-        "佳明没有第三方授权接口，请**先添加我为好友**，再**私聊**我发送：\n"
+    # Garmin：无 OAuth，引导私聊发邮箱密码。主动开一个私聊窗口（群临时会话优先，无需加
+    # 好友），让用户直接在该窗口回复「garmin绑定 邮箱 密码」，密码始终不会进群。
+    group_id = getattr(event, "group_id", None)
+    sent = await _send_private_robust(
+        bot,
+        int(qq),
+        group_id,
+        "佳明没有第三方授权接口，请在**这个私聊窗口**直接回复：\n"
         "「garmin绑定 邮箱 密码」\n"
         "例如：garmin绑定 abc@example.com MyPass123（邮箱和密码之间用一个空格隔开）\n"
-        "我会按你的 QQ 私密保存并登录拉数，密码不会出现在群里。"
+        "我会按你的 QQ 私密保存并登录拉数，密码不会出现在群里。",
+    )
+    if sent:
+        await bind_cmd.finish(
+            "已私聊你佳明绑定说明，请到私聊窗口按提示回复「garmin绑定 邮箱 密码」；"
+            "若没收到私聊，请先添加我为好友再发一次「绑定 garmin」"
+        )
+    await bind_cmd.finish(
+        "私聊发送失败（临时会话偶发超时），请**先添加我为好友**，再私聊我「garmin绑定 邮箱 密码」"
     )
 
 
@@ -122,7 +173,8 @@ async def handle_bind(bot: Bot, event: MessageEvent, args: Message = CommandArg(
 async def handle_garmin_bind(bot: Bot, event: MessageEvent, args: Message = CommandArg()):
     if not isinstance(event, PrivateMessageEvent):
         await garmin_bind_cmd.finish(
-            "请不要在群里发密码，请**先添加我为好友**，再私聊我「garmin绑定 邮箱 密码」"
+            "请不要在群里发密码！先发「绑定 garmin」，我会私聊你绑定说明，"
+            "在私聊窗口里回复「garmin绑定 邮箱 密码」"
         )
 
     parts = args.extract_plain_text().strip().split(None, 1)
@@ -256,7 +308,7 @@ async def handle_status(bot: Bot, event: MessageEvent):
         session.close()
 
     lines = [
-        f"佳明 Garmin：{counts['garmin']} 人 · 私聊「garmin绑定 邮箱 密码」",
+        f"佳明 Garmin：{counts['garmin']} 人 · 发「绑定 garmin」按私聊提示绑定",
         f"高驰 COROS：{counts['coros']} 人 · 发「绑定 coros」私密授权",
         f"其他平台：{n_manual} 人靠截图记录 · 📷 发运动截图自动记录",
     ]
