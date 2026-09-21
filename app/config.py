@@ -26,12 +26,12 @@ class Settings(BaseSettings):
     # COROS 高驰（官方 MCP + OAuth 授权，无需账号密码；region 决定接口区域）
     coros_region: str = "cn"  # cn / us
 
-    # 智谱 GLM 大模型（可选增强层：数据解读/总结；留空 = 自动禁用，机器人照常工作）
-    # 免费模型用 glm-4-flash，低价可用 glm-4-air
-    zhipu_api_key: str = ""
-    zhipu_model: str = "glm-4-flash"
-    # 大模型接口地址（OpenAI 兼容）；默认智谱，可改任意兼容服务
-    llm_base_url: str = "https://open.bigmodel.cn/api/paas/v4/chat/completions"
+    # 大模型（Agnes AI，OpenAI 兼容中转站；可选增强层：数据解读/总结/问答/点评；
+    # 留空 = 自动禁用，机器人照常工作）
+    llm_api_key: str = ""
+    llm_model: str = "agnes-2.5-flash"
+    # 大模型接口地址（OpenAI 兼容 chat/completions 全路径）
+    llm_base_url: str = "https://apihub.agnes-ai.com/v1/chat/completions"
 
 
 settings = Settings()

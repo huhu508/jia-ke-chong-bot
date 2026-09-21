@@ -268,7 +268,7 @@ async def handle_image(bot: Bot, event: MessageEvent):
         _format_cheer(data)
         + f"\n\n✅ 已记入今日数据：本次 +{data['distance_km']} km，累计 {total} km，发「今日」即可查看"
     )
-    # 智谱 AI 补一句点评：失败返回 None，自动降级为纯数据回显，不影响主链路
+    # 大模型补一句点评：失败返回 None，自动降级为纯数据回显，不影响主链路
     comment = await asyncio.to_thread(llm.comment_checkin, name, data)
     if comment:
         reply += f"\n\n💬 {comment}"

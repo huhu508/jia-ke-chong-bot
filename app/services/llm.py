@@ -1,12 +1,14 @@
-"""AI 大模型服务：调用智谱 GLM（OpenAI 兼容）做运动数据解读/总结。
+"""AI 大模型服务：调用 Agnes AI（OpenAI 兼容）做运动数据解读/总结/问答/点评。
 
 生态位（niche）设计：
   - LLM 是「锦上添花」的增强层，**绝不进核心数据链路**——OCR 识别、数据解析、
     排行聚合、平台同步都走确定性代码，不依赖 LLM；
   - 未配置 key 或调用失败时一律返回 None，由调用方降级到模板文案，机器人照常可用；
   - 只把「聚合后的数字」发给模型，不发送原始消息/截图/账号密码，保护隐私；
-  - 抽象成独立 provider，未来换 DeepSeek / 通义千问 / Kimi 等 OpenAI 兼容 API，
-    只需改 base_url + key，无需动调用方。
+  - 抽象成独立 provider，换任意 OpenAI 兼容 API 只需改 base_url + key，无需动调用方。
+
+注意：Agnes AI 只支持标准 OpenAI 接口，不支持智谱内置 web_search 联网搜索工具，
+故本模块不再做联网搜索（换回支持联网的平台时再恢复）。
 
 为阻塞网络调用，请在 asyncio.to_thread 中执行。
 """
@@ -27,74 +29,29 @@ def _chat(
     messages: list[dict],
     max_tokens: int = 400,
     timeout: float = _TIMEOUT,
-    web_search: bool = False,
 ) -> str | None:
-    """调一次智谱 GLM。成功返回文本；未配置 key / 任何异常返回 None。
-
-    web_search=True 时声明智谱内置联网搜索工具（tool_choice=auto，模型自行决定是否搜），
-    并把搜到的来源链接附在答案末尾。模型不支持 web_search（如免费 glm-4-flash）时，
-    服务端会报错，这里照常返回 None 走降级，不影响主链路。
-    """
-    if not settings.zhipu_api_key:
+    """调一次大模型（OpenAI 兼容）。成功返回文本；未配置 key / 任何异常返回 None。"""
+    if not settings.llm_api_key:
         return None
     payload = {
-        "model": settings.zhipu_model,
+        "model": settings.llm_model,
         "messages": messages,
         "max_tokens": max_tokens,
         "temperature": 0.7,
     }
-    if web_search:
-        payload["tools"] = [
-            {"type": "web_search", "web_search": {"enable": True, "search_result": True}}
-        ]
-        payload["tool_choice"] = "auto"
     try:
         resp = httpx.post(
             settings.llm_base_url,
-            headers={"Authorization": f"Bearer {settings.zhipu_api_key}"},
+            headers={"Authorization": f"Bearer {settings.llm_api_key}"},
             json=payload,
             timeout=timeout,
         )
         resp.raise_for_status()
         data = resp.json()
-        answer = data["choices"][0]["message"]["content"].strip()
-        if web_search:
-            sources = _extract_sources(data)
-            if sources:
-                answer = f"{answer}\n\n📎 参考来源：\n{sources}"
-        return answer
+        return data["choices"][0]["message"]["content"].strip()
     except Exception as e:
-        logger.warning(f"智谱 GLM 调用失败（将降级模板文案）: {e}")
+        logger.warning(f"大模型调用失败（将降级模板文案）: {e}")
         return None
-
-
-def _extract_sources(data, limit: int = 5) -> str:
-    """从 web_search 返回里递归提取「标题 + 链接」来源；找不到返回空串。
-
-    智谱的 search_result 条目形如 {title, link, content, media, ...}，可能在 message 或
-    tool_calls 的不同层级；递归遍历只抓同时含 link 与 title 的条目，容错不同返回结构。
-    """
-    found: list[dict] = []
-
-    def _walk(obj) -> None:
-        if isinstance(obj, dict):
-            link = obj.get("link") or obj.get("url")
-            title = obj.get("title")
-            if link and title and not any(x["link"] == link for x in found):
-                found.append({"title": title, "link": link})
-            for v in obj.values():
-                _walk(v)
-        elif isinstance(obj, list):
-            for v in obj:
-                _walk(v)
-
-    try:
-        _walk(data)
-    except Exception:
-        return ""
-    if not found:
-        return ""
-    return "\n".join(f"· {s['title']} {s['link']}" for s in found[:limit])
 
 
 def summarize_sport(name: str, period: str, s: dict) -> str | None:
@@ -145,22 +102,11 @@ def encourage(name: str, s: dict) -> str | None:
     )
 
 
-# 时效性关键词：命中才开联网搜索（省钱；免费 glm-4-flash 不支持 web_search 时走降级也不影响）。
-# 只收明确指向「需查外部实时信息」的词，避开「时间/地点/排名/成绩」等易误触发的训练问答。
-_WEB_KEYWORDS = (
-    "最新", "新闻", "赛事", "比赛", "马拉松", "报名", "开赛", "抽签", "中签",
-    "今年", "最近", "近期", "出炉", "公布", "官宣",
-    "推荐", "评测", "多少钱", "价格", "性价比", "哪款", "哪个牌子", "值得买",
-    "世界纪录", "冠军",
-)
-
-
 def answer_question(question: str) -> str | None:
     """运动知识自由问答；失败返回 None（由调用方降级）。
 
     范围严格限定在运动领域：遇到求职、学习辅导等无关话题，或暴力、违法等不当请求，
     一律礼貌拒绝并说明「只聊运动」，不展开回答（群里测试过「教我英语/简历优化/教我怎么打人」）。
-    命中时效性关键词（赛事/最新/推荐/价格等）时附带联网搜索，让模型基于实时信息回答。
     """
     system_prompt = (
         "你是运动群机器人「甲壳虫」的运动教练，只回答跑步、骑行、越野、健身、训练恢复等运动问题。"
@@ -168,16 +114,12 @@ def answer_question(question: str) -> str | None:
         "遇到与运动无关的话题（求职、英语、学习辅导等）或暴力、违法、骚扰等不当请求，"
         "一律礼貌拒绝并说明「我只聊运动相关」，不要展开、不要配合。"
     )
-    need_web = any(k in question for k in _WEB_KEYWORDS)
-    if need_web:
-        logger.info(f"[联网搜索] 命中时效性问题，开启 web_search: {question[:50]}")
     return _chat(
         [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": question.strip()},
         ],
         max_tokens=500,
-        web_search=need_web,
     )
 
 
