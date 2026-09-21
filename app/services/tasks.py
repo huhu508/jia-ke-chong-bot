@@ -35,11 +35,9 @@ async def _run_broadcast() -> None:
     today = datetime.date.today()
     day = datetime.timedelta(days=1)
 
-    # 播报前先清理过期明细（保留近 RETENTION_DAYS 天供周榜/月榜），幂等、每日执行
+    # 播报前清理过期明细（retention_days<=0 时永久保留、自动跳过），幂等、每日执行
     try:
-        await asyncio.to_thread(
-            retention.cleanup_daily, today - datetime.timedelta(days=retention.RETENTION_DAYS)
-        )
+        await asyncio.to_thread(retention.cleanup_daily)
     except Exception as e:
         logger.warning(f"清理过期明细失败（不影响播报）: {e}")
 
