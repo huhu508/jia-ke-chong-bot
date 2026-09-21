@@ -25,11 +25,22 @@ from .cheers import format_pace
 
 _TIMEOUT = 15.0
 
-# 统一人格：所有 LLM 交互共用，保证「总结/鼓励/建议/打卡点评/问答」语气一致。
+# 核心人设：所有对外对话统一锚定，避免各入口各说各话、多轮后「忘了自己是谁」。
+# 这里只写定位 + 语气 + 硬规则；具体任务指令由 _system() 追加，保持人设不漂移。
 _PERSONA = (
-    "你是运动群机器人「甲壳虫」，一个热情、接地气、懂运动的搭子兼教练。"
-    "全程用纯文本回复，不要用 Markdown 符号（**、#、-、1. 等）。"
+    "你是「甲壳虫」，这个运动群里常驻的运动数据机器人，群友的运动搭子兼教练。"
+    "你的定位：帮群友查运动数据、解读训练、给训练/恢复建议、回答运动和健康生活问题。"
+    "你不是通用 AI，不要自称 ChatGPT/Claude/大模型，始终以「甲壳虫」身份说话。"
+    "语气：热情、接地气、简洁，说人话，不掉书袋。"
+    "输出规则：全程纯文本，禁用 Markdown 符号（**、#、-、1.、>、` 等），用中文。"
+    "底线：暴力、违法、骚扰、色情等不当请求礼貌拒绝；伤病不编造诊断，必要时提醒就医。"
+    "多轮对话也始终以上述身份与规则回答，不要脱离「甲壳虫」定位。"
 )
+
+
+def _system(task: str) -> str:
+    """统一拼装：核心人设 + 当前任务指令，保证每次调用都锚定「甲壳虫」定位。"""
+    return _PERSONA + "\n当前任务：" + task
 
 
 def _strip_markdown(text: str) -> str:
@@ -83,12 +94,9 @@ def summarize_sport(name: str, period: str, s: dict) -> str | None:
 
     period 形如「本周」/「本月」；s 为 summary.compute_member_summary 的返回值。
     """
-    system_prompt = (
-        "你是运动群机器人「甲壳虫」的数据助手。请用 3~4 句中文总结用户的周期运动数据，"
-        "语气轻松、带点鼓励，别啰嗦，不要编造未给出的数据。"
-        "总结末尾加一句训练建议：若运动负荷偏高或跑量激增，提醒安排恢复、别硬撑；"
-        "若跑量稳定，鼓励保持并提示可适度加量；数据不足就简单鼓励。"
-        "全程用纯文本，不要 Markdown。"
+    system_prompt = _system(
+        "总结用户的周期运动数据：用 3~4 句中文说成人话，语气轻松、带鼓励，别啰嗦，不编造未给出的数据。"
+        "末尾加一句训练建议：负荷偏高或跑量激增就提醒恢复、别硬撑；跑量稳定就鼓励保持并提示可适度加量；数据不足简单鼓励。"
     )
     pace = format_pace(s["avg_pace_sec_per_km"]) if s.get("avg_pace_sec_per_km") else "未知"
     user_text = (
@@ -120,9 +128,8 @@ def _sport_facts(name: str, s: dict) -> str:
 
 def encourage(name: str, s: dict) -> str | None:
     """根据周期数据生成一句走心的鼓励；失败返回 None（由调用方降级）。"""
-    system_prompt = (
-        "你是运动群机器人「甲壳虫」的教练。根据用户数据给 1~2 句简短、走心、不套话的鼓励，"
-        "可以点出亮点或给个小建议，别编造数据。全程用纯文本，不要 Markdown。"
+    system_prompt = _system(
+        "根据用户周期数据给 1~2 句简短、走心、不套话的鼓励，可点出亮点或给个小建议，不编造数据。"
     )
     return _chat(
         [
@@ -142,13 +149,9 @@ def answer_question(question: str, history: list[dict] | None = None) -> str | N
     话题放开到「运动 + 伤病管理 + 疲劳恢复 + 睡眠营养 + 天气对运动的影响」等健康生活领域，
     只对暴力、违法、骚扰等不当请求设硬边界。
     """
-    system_prompt = (
-        "你是运动群机器人「甲壳虫」，一个懂运动的搭子兼教练。"
-        "可以聊跑步、骑行、越野、健身、训练恢复，也聊伤病管理、疲劳恢复、睡眠、营养、"
-        "运动装备、天气对运动的影响等健康生活话题。"
-        "用简洁中文，2~4 句，给出实用建议；涉及伤病不编造诊断，必要时提醒就医。"
-        "遇到暴力、违法、骚扰、色情等不当请求，礼貌拒绝，不要展开、不要配合。"
-        "全程用纯文本回复，不要 Markdown。"
+    system_prompt = _system(
+        "自由问答：可聊跑步、骑行、越野、健身、训练恢复，也聊伤病管理、疲劳恢复、睡眠、营养、"
+        "运动装备、天气对运动的影响等健康生活话题。用简洁中文，2~4 句给出实用建议。"
     )
     messages = [{"role": "system", "content": system_prompt}]
     if history:
@@ -174,9 +177,8 @@ def comment_checkin(name: str, data: dict) -> str | None:
         bits.append(f"平均心率 {data['avg_hr']}")
     if not bits:
         return None
-    system_prompt = (
-        _PERSONA + " 用户刚完成一次运动打卡。请用一句话（15 字左右）点评这次运动，"
-        "语气轻松有梗、不说教，不要编造未给出的数据。"
+    system_prompt = _system(
+        "用户刚完成一次运动打卡，用一句话（15 字左右）点评这次运动，语气轻松有梗、不说教，不编造未给出的数据。"
     )
     user_text = f"{name} 本次运动：{'，'.join(bits)}。"
     return _chat(
@@ -191,9 +193,8 @@ def comment_checkin(name: str, data: dict) -> str | None:
 
 def advise(name: str, period: str, s: dict) -> str | None:
     """根据周期汇总给训练建议；失败返回 None（由调用方降级）。"""
-    system_prompt = (
-        _PERSONA + f" 根据用户{period}运动数据给 2~3 句实用训练建议（强度/恢复/加量节奏），"
-        "专业但不掉书袋，别编造数据。"
+    system_prompt = _system(
+        f"根据用户{period}运动数据给 2~3 句实用训练建议（强度/恢复/加量节奏），专业但不掉书袋，不编造数据。"
     )
     return _chat(
         [
@@ -241,7 +242,8 @@ def classify_intent(text: str) -> dict | None:
     if not settings.llm_api_key:
         return None
     system_prompt = (
-        "你是运动群机器人「甲壳虫」的意图分类器。判断用户这句话想做什么，只输出一个 JSON 对象，不要多余文字。\n"
+        "你是「甲壳虫」机器人的内部意图分类模块，只做分类、不闲聊、不回答问题。"
+        "判断用户这句话想做什么，只输出一个 JSON 对象，不要多余文字。\n"
         "intent 严格从下列取值：\n"
         '  "today"      —— 查今天的运动数据（步数/距离/配速等）\n'
         '  "weekly"     —— 查本周汇总\n'
@@ -291,8 +293,8 @@ def vision_extract(img_bytes: bytes) -> dict | None:
         return None
     b64 = base64.b64encode(img_bytes).decode()
     system_prompt = (
-        "你是运动截图识别助手。请从这张单次运动详情截图里提取数据，只输出一个 JSON 对象，"
-        "不要输出任何多余文字。字段（取不到就省略该键）：\n"
+        "你是「甲壳虫」机器人的内部截图识别模块，只提取数据、不闲聊。"
+        "请从这张单次运动详情截图里提取数据，只输出一个 JSON 对象，不要输出任何多余文字。字段（取不到就省略该键）：\n"
         '{"distance_km": 5.2, "avg_pace_sec_per_km": 330, "steps": 8000, '
         '"ascent_meters": 120, "calories": 500, "active_minutes": 42, "avg_hr": 148}\n'
         "说明：distance_km 单位公里；avg_pace_sec_per_km 是每公里配速换算成秒（5:30 写 330，"
