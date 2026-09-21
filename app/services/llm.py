@@ -23,7 +23,17 @@ from nonebot.log import logger
 from ..config import settings
 from .cheers import format_pace
 
-_TIMEOUT = 15.0
+# 默认超时（秒）。Agnes 是 OpenAI 兼容中转，模型偶发慢响应；给足余量避免误判失败。
+_TIMEOUT = 45.0
+
+# 可安全重试一次的瞬时网络异常（超时/断连）；业务性错误（4xx/5xx/空内容）不重试。
+_RETRYABLE_EXC = (
+    httpx.ReadTimeout,
+    httpx.ConnectTimeout,
+    httpx.ConnectError,
+    httpx.ReadError,
+    httpx.RemoteProtocolError,
+)
 
 # 核心人设：所有对外对话统一锚定，避免各入口各说各话、多轮后「忘了自己是谁」。
 # 这里只写定位 + 语气 + 硬规则；具体任务指令由 _system() 追加，保持人设不漂移。
@@ -85,33 +95,82 @@ def _guard_identity(text: str) -> str:
     return text
 
 
-def _chat(
+def _extract_content(data: dict) -> str | None:
+    """从 OpenAI 兼容响应里安全取出 assistant 文本；空/异常返回 None。"""
+    try:
+        choices = data.get("choices") if isinstance(data, dict) else None
+        if not choices:
+            logger.warning(f"大模型响应缺 choices（疑似错误响应）: {str(data)[:300]!r}")
+            return None
+        content = choices[0].get("message", {}).get("content")
+        if content is None:
+            return None
+        text = str(content).strip()
+        return text or None
+    except Exception as e:
+        logger.warning(f"大模型响应解析失败: {e}")
+        return None
+
+
+def _call(
     messages: list[dict],
     max_tokens: int = 400,
+    temperature: float = 0.7,
     timeout: float = _TIMEOUT,
+    retries: int = 1,
 ) -> str | None:
-    """调一次大模型（OpenAI 兼容）。成功返回文本；未配置 key / 任何异常返回 None。"""
+    """调一次 chat/completions，返回 message.content 原文（已 strip）；失败/空返回 None。
+
+    统一处理三类失败，各做一件事：
+      - 瞬时网络异常（超时/断连）→ 重试一次；
+      - 业务错误（响应里带 error 字段）→ 直接放弃（重试无意义）；
+      - 空内容（推理模型被 max_tokens 截断等）→ 重试一次。
+    """
     if not settings.llm_api_key:
         return None
     payload = {
         "model": settings.llm_model,
         "messages": messages,
         "max_tokens": max_tokens,
-        "temperature": 0.7,
+        "temperature": temperature,
     }
-    try:
-        resp = httpx.post(
-            settings.llm_base_url,
-            headers={"Authorization": f"Bearer {settings.llm_api_key}"},
-            json=payload,
-            timeout=timeout,
-        )
-        resp.raise_for_status()
-        data = resp.json()
-        return _guard_identity(_strip_markdown(data["choices"][0]["message"]["content"].strip()))
-    except Exception as e:
-        logger.warning(f"大模型调用失败（将降级模板文案）: {e}")
+    for attempt in range(retries + 1):
+        try:
+            resp = httpx.post(
+                settings.llm_base_url,
+                headers={"Authorization": f"Bearer {settings.llm_api_key}"},
+                json=payload,
+                timeout=timeout,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+        except _RETRYABLE_EXC as e:
+            logger.warning(f"大模型网络异常（第 {attempt + 1}/{retries + 1} 次）: {e}")
+            continue
+        except Exception as e:
+            logger.warning(f"大模型调用失败（将降级）: {e}")
+            return None
+
+        if isinstance(data, dict) and data.get("error"):
+            logger.warning(f"大模型返回业务错误（将降级）: {str(data['error'])[:200]!r}")
+            return None
+        content = _extract_content(data)
+        if content is not None:
+            return content
+        logger.warning(f"大模型返回空内容，重试（第 {attempt + 1}/{retries + 1} 次）")
+    return None
+
+
+def _chat(
+    messages: list[dict],
+    max_tokens: int = 400,
+    timeout: float = _TIMEOUT,
+) -> str | None:
+    """调一次大模型并做群聊友好清洗（去 Markdown + 身份兜底）。失败返回 None。"""
+    content = _call(messages, max_tokens=max_tokens, temperature=0.7, timeout=timeout)
+    if content is None:
         return None
+    return _guard_identity(_strip_markdown(content))
 
 
 def summarize_sport(name: str, period: str, s: dict) -> str | None:
@@ -182,7 +241,7 @@ def answer_question(question: str, history: list[dict] | None = None) -> str | N
     if history:
         messages.extend(history)
     messages.append({"role": "user", "content": question.strip()})
-    return _chat(messages, max_tokens=500)
+    return _chat(messages, max_tokens=600)
 
 
 def comment_checkin(name: str, data: dict) -> str | None:
@@ -211,8 +270,8 @@ def comment_checkin(name: str, data: dict) -> str | None:
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_text},
         ],
-        max_tokens=120,
-        timeout=5.0,
+        max_tokens=200,
+        timeout=20.0,
     )
 
 
@@ -228,22 +287,6 @@ def advise(name: str, period: str, s: dict) -> str | None:
         ],
         max_tokens=400,
     )
-
-
-def _post_json(payload: dict, timeout: float) -> str | None:
-    """发一次 chat/completions 请求，成功返回 message.content，异常返回 None。"""
-    try:
-        resp = httpx.post(
-            settings.llm_base_url,
-            headers={"Authorization": f"Bearer {settings.llm_api_key}"},
-            json=payload,
-            timeout=timeout,
-        )
-        resp.raise_for_status()
-        return resp.json()["choices"][0]["message"]["content"].strip()
-    except Exception as e:
-        logger.warning(f"大模型调用失败（将降级）: {e}")
-        return None
 
 
 def _parse_json_obj(content: str) -> dict | None:
@@ -288,17 +331,14 @@ def classify_intent(text: str) -> dict | None:
         '示例：{"intent": "data_range", "range": "9月"}\n'
         '示例：{"intent": "chat"}'
     )
-    content = _post_json(
-        {
-            "model": settings.llm_model,
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": text.strip()},
-            ],
-            "max_tokens": 120,
-            "temperature": 0.1,
-        },
-        timeout=20.0,
+    content = _call(
+        [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": text.strip()},
+        ],
+        max_tokens=300,
+        temperature=0.1,
+        timeout=_TIMEOUT,
     )
     if content is None:
         return None
@@ -325,20 +365,17 @@ def vision_extract(img_bytes: bytes) -> dict | None:
         "说明：distance_km 单位公里；avg_pace_sec_per_km 是每公里配速换算成秒（5:30 写 330，"
         "4:05 写 245）；steps 步数整数；active_minutes 活动分钟；avg_hr 平均心率 bpm。"
     )
-    content = _post_json(
-        {
-            "model": settings.llm_model,
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": [
-                    {"type": "text", "text": "提取这张截图里的运动数据，只输出 JSON。"},
-                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}},
-                ]},
-            ],
-            "max_tokens": 300,
-            "temperature": 0.1,
-        },
-        timeout=20.0,
+    content = _call(
+        [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": [
+                {"type": "text", "text": "提取这张截图里的运动数据，只输出 JSON。"},
+                {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}},
+            ]},
+        ],
+        max_tokens=300,
+        temperature=0.1,
+        timeout=_TIMEOUT,
     )
     if content is None:
         return None

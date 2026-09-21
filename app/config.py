@@ -29,7 +29,9 @@ class Settings(BaseSettings):
     # 大模型（Agnes AI，OpenAI 兼容中转站；可选增强层：数据解读/总结/问答/点评；
     # 留空 = 自动禁用，机器人照常工作）
     llm_api_key: str = ""
-    llm_model: str = "agnes-2.5-flash"
+    # 用 3.0-flash：非推理对话模型，快且稳定。勿换 2.5-flash——它是推理/agent 模型，
+    # 慢（易超时）且会把 max_tokens 花在思考上导致 content 为空。
+    llm_model: str = "agnes-3.0-flash"
     # 大模型接口地址（OpenAI 兼容 chat/completions 全路径）
     llm_base_url: str = "https://apihub.agnes-ai.com/v1/chat/completions"
 
