@@ -112,25 +112,26 @@ def _format_cheer(data: dict) -> str:
 
 
 # ---------------------------------------------------------------------------
-# 重复打卡去重（内存态，10 分钟窗口）
-# NapChat 偶发发送超时会诱导用户重发同一张图，用 MD5 短窗口去重，避免重复累计里程。
+# 重复打卡去重（内存态，24 小时窗口，全局去重）
+# 同一张图（MD5 相同）无论本人重发还是群里他人转发，只累计一次，
+# 距离/爬升/时长/消耗等全部字段都不重复计入。
 # ---------------------------------------------------------------------------
 
-_RECENT_IMAGES: dict[str, float] = {}  # f"{qq}:{md5}" -> 记录时间戳
-_DUP_WINDOW_SEC = 600
+_RECENT_IMAGES: dict[str, float] = {}  # md5 -> 记录时间戳
+_DUP_WINDOW_SEC = 86400  # 24 小时
 
 
-def _is_duplicate(qq: str, md5: str) -> bool:
-    """同一张图在窗口期内重发视为重复；顺带惰性清理过期项。"""
+def _is_duplicate(md5: str) -> bool:
+    """同一张图在窗口期内重发（含群内转发）视为重复；顺带惰性清理过期项。"""
     now = time.time()
     stale = [k for k, ts in _RECENT_IMAGES.items() if now - ts > _DUP_WINDOW_SEC]
     for k in stale:
         _RECENT_IMAGES.pop(k, None)
-    return f"{qq}:{md5}" in _RECENT_IMAGES
+    return md5 in _RECENT_IMAGES
 
 
-def _mark_seen(qq: str, md5: str) -> None:
-    _RECENT_IMAGES[f"{qq}:{md5}"] = time.time()
+def _mark_seen(md5: str) -> None:
+    _RECENT_IMAGES[md5] = time.time()
 
 
 @image_matcher.handle()
@@ -151,7 +152,7 @@ async def handle_image(bot: Bot, event: MessageEvent):
         logger.info(f"[图片识别] qq={qq} 疑似表情包/小图，跳过")
         return
 
-    # 图片指纹：用于短窗口去重（见 _is_duplicate）
+    # 图片指纹：用于全局去重（见 _is_duplicate）
     img_md5 = hashlib.md5(img_bytes).hexdigest()
 
     # 保存原始图片，便于排查 OCR 识别误差
@@ -243,8 +244,8 @@ async def handle_image(bot: Bot, event: MessageEvent):
     if "distance_km" not in data:
         await image_matcher.finish(_format_cheer(data))
 
-    # 重复打卡去重：同一张图短时间内重发，不重复累计
-    if _is_duplicate(qq, img_md5):
+    # 重复打卡去重：同一张图（含群内转发）已记过，全部字段不重复累计
+    if _is_duplicate(img_md5):
         await image_matcher.finish(
             _format_cheer(data) + "\n\n⏳ 这张截图刚才已经记过啦，本次不重复累计"
         )
@@ -269,7 +270,7 @@ async def handle_image(bot: Bot, event: MessageEvent):
         )
         sync.record_manual_activity(member, today_d, stats, session)
         sync.log_checkin(qq, today_d, data["distance_km"], session)
-        _mark_seen(qq, img_md5)
+        _mark_seen(img_md5)
 
         # 打卡彩蛋：里程碑 / 礼物 / 节日+特殊距离 / 群抽奖（幂等，状态表保证只触发一次）
         checkin_total = checkin.total_days(qq, session)

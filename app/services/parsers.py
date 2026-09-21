@@ -323,8 +323,8 @@ def _value_near(items, anchor, extractor):
         dy = it["cy"] - anchor["cy"]
         ok = (
             (abs(dy) <= 40 and -350 <= dx <= -10)  # 左侧同行
-            or (-240 <= dy <= -15 and abs(dx) <= 150)  # 上方
-            or (15 <= dy <= 90 and abs(dx) <= 150)  # 下方
+            or (-240 <= dy <= -15 and abs(dx) <= 350)  # 上方（含左上斜角：大字在单位左上，水平可偏 200+）
+            or (15 <= dy <= 90 and abs(dx) <= 350)  # 下方
         )
         if not ok:
             continue

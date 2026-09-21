@@ -1,6 +1,11 @@
 """页面类型识别 + 文本解析 + 合理性校验的纯函数测试。"""
 
-from app.services.parsers import detect_page_kind, parse_activity, sanitize_activity
+from app.services.parsers import (
+    detect_page_kind,
+    parse_activity,
+    parse_activity_from_boxes,
+    sanitize_activity,
+)
 
 
 def test_detect_activity_detail():
@@ -67,3 +72,31 @@ def test_sanitize_drop_out_of_range_fields():
     )
     assert reject is None
     assert cleaned == {"distance_km": 5.0}
+
+
+def _box(cx, cy, w=30.0, h=20.0):
+    """按中心点构造一个 OCR 框（四点坐标），供 parse_activity_from_boxes 测试。"""
+    return [
+        [cx - w / 2, cy - h / 2],
+        [cx + w / 2, cy - h / 2],
+        [cx + w / 2, cy + h / 2],
+        [cx - w / 2, cy + h / 2],
+    ]
+
+
+def test_parse_boxes_distance_diagonal_unit():
+    # 悦跑圈布局：距离大字「4.03」在单位「公里」的**左上方**（dx≈-216, dy≈-45），
+    # 成对角线排列。历史上 _value_near 的「上方」规则 abs(dx)<=150 过窄导致距离读不出。
+    result = [
+        (_box(222.0, 395.0, w=60, h=50), "4.03", 0.99),  # 距离大字（左上）
+        (_box(438.5, 440.5), "公里", 0.99),  # 单位（右下）
+        (_box(741.0, 1541.5, w=90), "264千卡", 0.99),  # 消耗（合并框）
+        (_box(102.5, 1483.5), "训练时长", 0.99),  # 时长标签
+        (_box(155.0, 1544.5, w=80), "00:24:52", 0.99),  # 时长值（标签下方）
+        (_box(714.0, 1695.0, w=70), "150米", 0.99),  # 爬升（合并框）
+    ]
+    data = parse_activity_from_boxes(result)
+    assert data["distance_km"] == 4.03
+    assert data["calories"] == 264
+    assert data["active_minutes"] == 24
+    assert data["ascent_meters"] == 150.0
