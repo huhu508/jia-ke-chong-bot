@@ -47,16 +47,15 @@ def _period_of(kind: str) -> tuple[str, date, date, str]:
     )
 
 
-async def _gather(event: MessageEvent, kind: str):
-    """拉取某成员周期汇总，返回 (name, period, span, summary_dict, bound)。"""
-    qq = event.get_user_id()
-    name = getattr(event.sender, "nickname", None) or qq
+async def _gather_qq(qq: str, nickname: str, kind: str):
+    """按 qq 拉取某成员周期汇总，返回 (name, period, span, summary_dict, bound)。"""
+    nickname = nickname or qq
     period, start, end, span = _period_of(kind)
     session = get_session()
     try:
         member = session.get(Member, qq)
         if member is not None:
-            name = member.display_name
+            nickname = member.display_name
         # 提前把绑定平台读成普通值，session 关闭后不再碰 ORM 对象
         platform = member.platform if member is not None else ""
     finally:
@@ -70,7 +69,41 @@ async def _gather(event: MessageEvent, kind: str):
             logger.warning(f"周期数据同步今日失败（用已有数据）: {e}")
 
     s = await asyncio.to_thread(summary.compute_member_summary, qq, start, end)
-    return name, period, span, s, bool(platform)
+    return nickname, period, span, s, bool(platform)
+
+
+async def build_period(qq: str, nickname: str, kind: str, mode: str) -> str:
+    """构建周期结果文本（命令 handler 与自然语言路由共用）。
+
+    mode: ``data``（周/月数据）/ ``ai``（总结）/ ``advise``（建议）/ ``encourage``（鼓励）。
+    """
+    name, period, span, s, bound = await _gather_qq(qq, nickname, kind)
+
+    # 鼓励：无数据也照常鼓励（沿用原行为，不拦）
+    if mode == "encourage":
+        text = await asyncio.to_thread(llm.encourage, name, s)
+        if text:
+            return f"🤖 {name}，{text}"
+        return _template_cheer(name, s)
+
+    # 与 周数据/月数据/建议 口径一致：无数据先给友好提示，避免把全 0 数据喂给 LLM 编造
+    if s["active_days"] == 0 and s["distance_km"] <= 0:
+        return _empty_hint(name, period, span, bound)
+
+    if mode == "data":
+        return _format_summary(name, period, span, s)
+
+    if mode == "ai":
+        text = await asyncio.to_thread(llm.summarize_sport, name, period, s)
+        if text:
+            return f"🤖 {name} {period}总结\n━━━━━━━━━━━━\n{text}"
+        return f"🤖 {name} {period}总结\n━━━━━━━━━━━━\n{_template_summary(name, period, s)}"
+
+    # advise
+    text = await asyncio.to_thread(llm.advise, name, period, s)
+    if text:
+        return f"🤖 {name} {period}训练建议\n━━━━━━━━━━━━\n{text}"
+    return f"🤖 {name} {period}训练建议\n━━━━━━━━━━━━\n{_template_advise(name, period, s)}"
 
 
 def _format_summary(name: str, period: str, span: str, s: dict) -> str:
@@ -156,11 +189,11 @@ def _template_advise(name: str, period: str, s: dict) -> str:
 
 @weekly_cmd.handle()
 async def handle_weekly(bot: Bot, event: MessageEvent):
+    qq = event.get_user_id()
+    nickname = getattr(event.sender, "nickname", None)
     try:
-        name, period, span, s, bound = await _gather(event, "周")
-        if s["active_days"] == 0 and s["distance_km"] <= 0:
-            await weekly_cmd.finish(_empty_hint(name, period, span, bound))
-        await weekly_cmd.finish(_format_summary(name, period, span, s))
+        text = await build_period(qq, nickname, "周", "data")
+        await weekly_cmd.finish(text)
     except (FinishedException, ActionFailed):
         raise
     except Exception as e:
@@ -170,11 +203,11 @@ async def handle_weekly(bot: Bot, event: MessageEvent):
 
 @monthly_cmd.handle()
 async def handle_monthly(bot: Bot, event: MessageEvent):
+    qq = event.get_user_id()
+    nickname = getattr(event.sender, "nickname", None)
     try:
-        name, period, span, s, bound = await _gather(event, "月")
-        if s["active_days"] == 0 and s["distance_km"] <= 0:
-            await monthly_cmd.finish(_empty_hint(name, period, span, bound))
-        await monthly_cmd.finish(_format_summary(name, period, span, s))
+        text = await build_period(qq, nickname, "月", "data")
+        await monthly_cmd.finish(text)
     except (FinishedException, ActionFailed):
         raise
     except Exception as e:
@@ -187,17 +220,10 @@ async def handle_ai(bot: Bot, event: MessageEvent, args: Message = CommandArg())
     # 可选参数：总结 月 → 总结本月；默认总结本周
     kind = "月" if "月" in args.extract_plain_text() else "周"
     try:
-        name, period, span, s, bound = await _gather(event, kind)
-        # 与 周数据/月数据/建议 口径一致：无数据先给友好提示，避免把全 0 数据喂给 LLM 编造总结
-        if s["active_days"] == 0 and s["distance_km"] <= 0:
-            await ai_cmd.finish(_empty_hint(name, period, span, bound))
-        text = await asyncio.to_thread(llm.summarize_sport, name, period, s)
-        if text:
-            await ai_cmd.finish(f"🤖 {name} {period}总结\n━━━━━━━━━━━━\n{text}")
-        # 未配置 key 或调用失败 → 降级到模板，仍给出可读总结
-        await ai_cmd.finish(
-            f"🤖 {name} {period}总结\n━━━━━━━━━━━━\n{_template_summary(name, period, s)}"
+        text = await build_period(
+            event.get_user_id(), getattr(event.sender, "nickname", None), kind, "ai"
         )
+        await ai_cmd.finish(text)
     except (FinishedException, ActionFailed):
         raise
     except Exception as e:
@@ -208,11 +234,10 @@ async def handle_ai(bot: Bot, event: MessageEvent, args: Message = CommandArg())
 @encourage_cmd.handle()
 async def handle_encourage(bot: Bot, event: MessageEvent):
     try:
-        name, _, _, s, _ = await _gather(event, "周")
-        text = await asyncio.to_thread(llm.encourage, name, s)
-        if text:
-            await encourage_cmd.finish(f"🤖 {name}，{text}")
-        await encourage_cmd.finish(_template_cheer(name, s))
+        text = await build_period(
+            event.get_user_id(), getattr(event.sender, "nickname", None), "周", "encourage"
+        )
+        await encourage_cmd.finish(text)
     except (FinishedException, ActionFailed):
         raise
     except Exception as e:
@@ -225,15 +250,10 @@ async def handle_advise(bot: Bot, event: MessageEvent, args: Message = CommandAr
     # 可选参数：建议 月 → 按本月数据；默认按本周
     kind = "月" if "月" in args.extract_plain_text() else "周"
     try:
-        name, period, span, s, bound = await _gather(event, kind)
-        if s["active_days"] == 0 and s["distance_km"] <= 0:
-            await advise_cmd.finish(_empty_hint(name, period, span, bound))
-        text = await asyncio.to_thread(llm.advise, name, period, s)
-        if text:
-            await advise_cmd.finish(f"🤖 {name} {period}训练建议\n━━━━━━━━━━━━\n{text}")
-        await advise_cmd.finish(
-            f"🤖 {name} {period}训练建议\n━━━━━━━━━━━━\n{_template_advise(name, period, s)}"
+        text = await build_period(
+            event.get_user_id(), getattr(event.sender, "nickname", None), kind, "advise"
         )
+        await advise_cmd.finish(text)
     except (FinishedException, ActionFailed):
         raise
     except Exception as e:

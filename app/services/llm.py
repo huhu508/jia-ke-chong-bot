@@ -13,6 +13,10 @@
 为阻塞网络调用，请在 asyncio.to_thread 中执行。
 """
 
+import base64
+import json
+import re
+
 import httpx
 from nonebot.log import logger
 
@@ -22,7 +26,27 @@ from .cheers import format_pace
 _TIMEOUT = 15.0
 
 # 统一人格：所有 LLM 交互共用，保证「总结/鼓励/建议/打卡点评/问答」语气一致。
-_PERSONA = "你是运动群机器人「甲壳虫」，一个热情、接地气、懂运动的搭子兼教练。"
+_PERSONA = (
+    "你是运动群机器人「甲壳虫」，一个热情、接地气、懂运动的搭子兼教练。"
+    "全程用纯文本回复，不要用 Markdown 符号（**、#、-、1. 等）。"
+)
+
+
+def _strip_markdown(text: str) -> str:
+    """把 LLM 偶发的 Markdown 还原成群聊友好纯文本（QQ 不渲染 Markdown，原样显示会乱）。"""
+    if not text:
+        return text
+    t = text
+    t = re.sub(r"\*\*(.+?)\*\*", r"\1", t)  # 加粗
+    t = re.sub(r"__(.+?)__", r"\1", t)  # 加粗（下划线）
+    t = re.sub(r"~~(.+?)~~", r"\1", t)  # 删除线
+    t = re.sub(r"(?m)^#{1,6}\s*", "", t)  # 标题
+    t = re.sub(r"(?m)^\s*[-*+]\s+", "", t)  # 无序列表
+    t = re.sub(r"(?m)^\s*\d+[.、)]\s+", "", t)  # 有序列表
+    t = re.sub(r"(?m)^\s*>\s*", "", t)  # 引用
+    t = re.sub(r"`([^`]+)`", r"\1", t)  # 行内代码
+    t = re.sub(r"\[([^\]]+)\]\([^)]*\)", r"\1", t)  # 链接
+    return t
 
 
 def _chat(
@@ -48,7 +72,7 @@ def _chat(
         )
         resp.raise_for_status()
         data = resp.json()
-        return data["choices"][0]["message"]["content"].strip()
+        return _strip_markdown(data["choices"][0]["message"]["content"].strip())
     except Exception as e:
         logger.warning(f"大模型调用失败（将降级模板文案）: {e}")
         return None
@@ -60,13 +84,18 @@ def summarize_sport(name: str, period: str, s: dict) -> str | None:
     period 形如「本周」/「本月」；s 为 summary.compute_member_summary 的返回值。
     """
     system_prompt = (
-        "你是运动群机器人「甲壳虫」的数据助手。请用 2~3 句中文总结用户的周期运动数据，"
+        "你是运动群机器人「甲壳虫」的数据助手。请用 3~4 句中文总结用户的周期运动数据，"
         "语气轻松、带点鼓励，别啰嗦，不要编造未给出的数据。"
+        "总结末尾加一句训练建议：若运动负荷偏高或跑量激增，提醒安排恢复、别硬撑；"
+        "若跑量稳定，鼓励保持并提示可适度加量；数据不足就简单鼓励。"
+        "全程用纯文本，不要 Markdown。"
     )
+    pace = format_pace(s["avg_pace_sec_per_km"]) if s.get("avg_pace_sec_per_km") else "未知"
     user_text = (
         f"{name} 的{period}数据：运动 {s.get('activities', 0)} 次（共 {s.get('active_days', 0)} 天），"
         f"总距离 {s.get('distance_km', 0)} km，爬升 {s.get('ascent_meters', 0)} m，"
         f"总时长 {s.get('active_minutes', 0)} 分钟，消耗 {s.get('calories', 0)} 千卡，"
+        f"平均配速 {pace}/km，平均心率 {s.get('avg_hr', 0)} bpm，"
         f"运动负荷 {s.get('training_load', 0)}，单次最长 {s.get('max_activity_distance_km', 0)} km。"
     )
     return _chat(
@@ -79,10 +108,12 @@ def summarize_sport(name: str, period: str, s: dict) -> str | None:
 
 def _sport_facts(name: str, s: dict) -> str:
     """把汇总 dict 拼成一句供 prompt 复用的数字描述。"""
+    pace = format_pace(s["avg_pace_sec_per_km"]) if s.get("avg_pace_sec_per_km") else "未知"
     return (
         f"{name}：运动 {s.get('activities', 0)} 次（共 {s.get('active_days', 0)} 天），"
         f"距离 {s.get('distance_km', 0)} km，爬升 {s.get('ascent_meters', 0)} m，"
         f"时长 {s.get('active_minutes', 0)} 分钟，消耗 {s.get('calories', 0)} 千卡，"
+        f"平均配速 {pace}/km，平均心率 {s.get('avg_hr', 0)} bpm，"
         f"负荷 {s.get('training_load', 0)}，单次最长 {s.get('max_activity_distance_km', 0)} km"
     )
 
@@ -91,7 +122,7 @@ def encourage(name: str, s: dict) -> str | None:
     """根据周期数据生成一句走心的鼓励；失败返回 None（由调用方降级）。"""
     system_prompt = (
         "你是运动群机器人「甲壳虫」的教练。根据用户数据给 1~2 句简短、走心、不套话的鼓励，"
-        "可以点出亮点或给个小建议，别编造数据。"
+        "可以点出亮点或给个小建议，别编造数据。全程用纯文本，不要 Markdown。"
     )
     return _chat(
         [
@@ -102,25 +133,28 @@ def encourage(name: str, s: dict) -> str | None:
     )
 
 
-def answer_question(question: str) -> str | None:
-    """运动知识自由问答；失败返回 None（由调用方降级）。
+def answer_question(question: str, history: list[dict] | None = None) -> str | None:
+    """运动与健康生活自由问答；失败返回 None（由调用方降级）。
 
-    范围严格限定在运动领域：遇到求职、学习辅导等无关话题，或暴力、违法等不当请求，
-    一律礼貌拒绝并说明「只聊运动」，不展开回答（群里测试过「教我英语/简历优化/教我怎么打人」）。
+    history 为多轮对话上下文（``[{"role": "user"/"assistant", "content": ...}]``，旧→新），
+    供 @机器人 连续对话时带上最近几轮，让回答更连贯。
+
+    话题放开到「运动 + 伤病管理 + 疲劳恢复 + 睡眠营养 + 天气对运动的影响」等健康生活领域，
+    只对暴力、违法、骚扰等不当请求设硬边界。
     """
     system_prompt = (
-        "你是运动群机器人「甲壳虫」的运动教练，只回答跑步、骑行、越野、健身、训练恢复等运动问题。"
-        "用简洁中文，2~4 句，给出实用建议，不要编造医学结论。"
-        "遇到与运动无关的话题（求职、英语、学习辅导等）或暴力、违法、骚扰等不当请求，"
-        "一律礼貌拒绝并说明「我只聊运动相关」，不要展开、不要配合。"
+        "你是运动群机器人「甲壳虫」，一个懂运动的搭子兼教练。"
+        "可以聊跑步、骑行、越野、健身、训练恢复，也聊伤病管理、疲劳恢复、睡眠、营养、"
+        "运动装备、天气对运动的影响等健康生活话题。"
+        "用简洁中文，2~4 句，给出实用建议；涉及伤病不编造诊断，必要时提醒就医。"
+        "遇到暴力、违法、骚扰、色情等不当请求，礼貌拒绝，不要展开、不要配合。"
+        "全程用纯文本回复，不要 Markdown。"
     )
-    return _chat(
-        [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": question.strip()},
-        ],
-        max_tokens=500,
-    )
+    messages = [{"role": "system", "content": system_prompt}]
+    if history:
+        messages.extend(history)
+    messages.append({"role": "user", "content": question.strip()})
+    return _chat(messages, max_tokens=500)
 
 
 def comment_checkin(name: str, data: dict) -> str | None:
@@ -168,3 +202,133 @@ def advise(name: str, period: str, s: dict) -> str | None:
         ],
         max_tokens=400,
     )
+
+
+def _post_json(payload: dict, timeout: float) -> str | None:
+    """发一次 chat/completions 请求，成功返回 message.content，异常返回 None。"""
+    try:
+        resp = httpx.post(
+            settings.llm_base_url,
+            headers={"Authorization": f"Bearer {settings.llm_api_key}"},
+            json=payload,
+            timeout=timeout,
+        )
+        resp.raise_for_status()
+        return resp.json()["choices"][0]["message"]["content"].strip()
+    except Exception as e:
+        logger.warning(f"大模型调用失败（将降级）: {e}")
+        return None
+
+
+def _parse_json_obj(content: str) -> dict | None:
+    """从模型返回文本里抠出第一个 JSON 对象并解析；失败返回 None。"""
+    m = re.search(r"\{.*\}", content or "", re.DOTALL)
+    if not m:
+        return None
+    try:
+        data = json.loads(m.group(0))
+    except Exception as e:
+        logger.warning(f"JSON 解析失败: {content[:120]!r} -> {e}")
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def classify_intent(text: str) -> dict | None:
+    """自然语言查询意图分类，供 @机器人 把自然语言路由到已有命令；失败返回 None（降级纯问答）。
+
+    返回形如 ``{"intent": "today", "period": "week", "scope": "day", "range": "9月"}``。
+    """
+    if not settings.llm_api_key:
+        return None
+    system_prompt = (
+        "你是运动群机器人「甲壳虫」的意图分类器。判断用户这句话想做什么，只输出一个 JSON 对象，不要多余文字。\n"
+        "intent 严格从下列取值：\n"
+        '  "today"      —— 查今天的运动数据（步数/距离/配速等）\n'
+        '  "weekly"     —— 查本周汇总\n'
+        '  "monthly"    —— 查本月汇总\n'
+        '  "summary"    —— 要 AI 总结运动数据（总结/帮我看看）\n'
+        '  "advise"     —— 要训练建议（怎么练/建议/如何提高）\n'
+        '  "encourage"  —— 要鼓励/夸夸\n'
+        '  "ranking"    —— 查排行（今天/本周/本月谁最多）\n'
+        '  "data_range" —— 查某个时间段汇总（某月/近N天）\n'
+        '  "history"    —— 查逐日明细/训练记录\n'
+        '  "chat"       —— 运动知识问答或闲聊（默认）\n'
+        "附加字段（不需要时省略）：period 取 week/month；scope 取 day/week/month（ranking 用）；"
+        'range 存时间段原文（data_range/history 用，如「9月」「近30天」）。\n'
+        '示例：{"intent": "today"}\n'
+        '示例：{"intent": "ranking", "scope": "week"}\n'
+        '示例：{"intent": "summary", "period": "month"}\n'
+        '示例：{"intent": "data_range", "range": "9月"}\n'
+        '示例：{"intent": "chat"}'
+    )
+    content = _post_json(
+        {
+            "model": settings.llm_model,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": text.strip()},
+            ],
+            "max_tokens": 120,
+            "temperature": 0.1,
+        },
+        timeout=20.0,
+    )
+    if content is None:
+        return None
+    data = _parse_json_obj(content)
+    if not data or "intent" not in data:
+        return None
+    return data
+
+
+def vision_extract(img_bytes: bytes) -> dict | None:
+    """用视觉模型兜底识别运动截图，返回结构化运动数据；失败/未配置返回 None。
+
+    仅作为 RapidOCR 识别不出时的多模态兜底，绝不进主识别链路。模型输出 JSON 后
+    本地解析并做类型归一（字段与 parsers/DailyStats 对齐），异常一律 None。
+    """
+    if not settings.llm_api_key:
+        return None
+    b64 = base64.b64encode(img_bytes).decode()
+    system_prompt = (
+        "你是运动截图识别助手。请从这张单次运动详情截图里提取数据，只输出一个 JSON 对象，"
+        "不要输出任何多余文字。字段（取不到就省略该键）：\n"
+        '{"distance_km": 5.2, "avg_pace_sec_per_km": 330, "steps": 8000, '
+        '"ascent_meters": 120, "calories": 500, "active_minutes": 42, "avg_hr": 148}\n'
+        "说明：distance_km 单位公里；avg_pace_sec_per_km 是每公里配速换算成秒（5:30 写 330，"
+        "4:05 写 245）；steps 步数整数；active_minutes 活动分钟；avg_hr 平均心率 bpm。"
+    )
+    content = _post_json(
+        {
+            "model": settings.llm_model,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": [
+                    {"type": "text", "text": "提取这张截图里的运动数据，只输出 JSON。"},
+                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}},
+                ]},
+            ],
+            "max_tokens": 300,
+            "temperature": 0.1,
+        },
+        timeout=20.0,
+    )
+    if content is None:
+        return None
+    raw = _parse_json_obj(content)
+    if not raw:
+        return None
+
+    int_keys = ("steps", "calories", "active_minutes", "avg_hr")
+    float_keys = ("distance_km", "ascent_meters", "avg_pace_sec_per_km", "sleep_hours")
+    data: dict = {}
+    for k, v in raw.items():
+        if k not in int_keys and k not in float_keys:
+            continue
+        if isinstance(v, bool):
+            continue
+        try:
+            data[k] = int(float(v)) if k in int_keys else float(v)
+        except (ValueError, TypeError):
+            continue
+    return data

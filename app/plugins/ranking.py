@@ -1,5 +1,5 @@
 import asyncio
-from datetime import date, timedelta
+from datetime import timedelta
 
 from nonebot import on_command
 from nonebot.adapters.onebot.v11 import Bot, MessageEvent
@@ -20,39 +20,47 @@ async def _refresh_today() -> None:
         logger.warning(f"同步今日数据失败（仍用已有数据）: {e}")
 
 
-async def _finish_ranking(matcher, start: date, end: date, title: str, scope: str = "day") -> None:
+async def build_ranking(scope: str = "day") -> str:
+    """构建榜单文本（命令 handler 与自然语言路由共用）。scope: day/week/month。"""
     await _refresh_today()
-    try:
-        # compute_range_rankings 自开 session，可安全放进线程，避免同步 DB 查询阻塞事件循环
-        r = await asyncio.to_thread(ranking.compute_range_rankings, start, end, scope=scope)
-        text = ranking.format_leaderboards(r, title)
-    except Exception as e:
-        logger.exception(f"排行查询失败: {e}")
-        await matcher.finish(f"排行查询失败：{e}")
-    await matcher.finish(text)
+    today = timeutil.today()
+    if scope == "week":
+        start = today - timedelta(days=today.weekday())
+        r = await asyncio.to_thread(ranking.compute_range_rankings, start, today + timedelta(days=1), scope="week")
+        return ranking.format_leaderboards(r, ranking.weekly_title(start, today))
+    if scope == "month":
+        start = today.replace(day=1)
+        r = await asyncio.to_thread(ranking.compute_range_rankings, start, today + timedelta(days=1), scope="month")
+        return ranking.format_leaderboards(r, ranking.monthly_title(today))
+    r = await asyncio.to_thread(ranking.compute_range_rankings, today, today + timedelta(days=1), scope="day")
+    return ranking.format_leaderboards(r, ranking.daily_title(today))
 
 
 @ranking_cmd.handle()
 async def handle_ranking(bot: Bot, event: MessageEvent):
-    today = timeutil.today()
-    await _finish_ranking(ranking_cmd, today, today + timedelta(days=1), ranking.daily_title(today))
+    try:
+        text = await build_ranking("day")
+        await ranking_cmd.finish(text)
+    except Exception as e:
+        logger.exception(f"排行查询失败: {e}")
+        await ranking_cmd.finish(f"排行查询失败：{e}")
 
 
 @weekly_cmd.handle()
 async def handle_weekly(bot: Bot, event: MessageEvent):
-    today = timeutil.today()
-    this_monday = today - timedelta(days=today.weekday())
-    await _finish_ranking(
-        weekly_cmd, this_monday, today + timedelta(days=1), ranking.weekly_title(this_monday, today),
-        scope="week",
-    )
+    try:
+        text = await build_ranking("week")
+        await weekly_cmd.finish(text)
+    except Exception as e:
+        logger.exception(f"周榜查询失败: {e}")
+        await weekly_cmd.finish(f"周榜查询失败：{e}")
 
 
 @monthly_cmd.handle()
 async def handle_monthly(bot: Bot, event: MessageEvent):
-    today = timeutil.today()
-    month_start = today.replace(day=1)
-    await _finish_ranking(
-        monthly_cmd, month_start, today + timedelta(days=1), ranking.monthly_title(today),
-        scope="month",
-    )
+    try:
+        text = await build_ranking("month")
+        await monthly_cmd.finish(text)
+    except Exception as e:
+        logger.exception(f"月榜查询失败: {e}")
+        await monthly_cmd.finish(f"月榜查询失败：{e}")

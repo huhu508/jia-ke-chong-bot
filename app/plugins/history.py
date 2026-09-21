@@ -1,7 +1,7 @@
 """历史数据查询：发「数据 [时间段]」看汇总、「历史 [时间段]」看逐日明细。
 
 与「周数据 / 月数据」互补：那两个只查当前周/月，这里查任意历史区间。
-时间段支持：近30天 / 近3个月 / 8月 / 2026年8月 / 上月 / 本周 / 本月。
+时间段支持：近30天 / 近3个月 / 9月 / 2026年9月 / 上月 / 本周 / 本月。
 """
 
 import asyncio
@@ -24,9 +24,9 @@ history_cmd = on_command("历史", aliases={"明细", "逐日", "训练记录"},
 
 _USAGE = (
     "📊 用法：\n"
-    "· 数据 8月 —— 查某月汇总\n"
+    "· 数据 9月 —— 查某月汇总\n"
     "· 数据 近30天 / 近3个月 —— 查时间段汇总\n"
-    "· 历史 8月 —— 查某月逐日明细\n"
+    "· 历史 9月 —— 查某月逐日明细\n"
     "支持：近N天 / 近N个月 / X月 / 2026年X月 / 上月 / 本周 / 本月"
 )
 
@@ -36,16 +36,36 @@ def _span(start: date, end: date) -> str:
     return f"{start.month}月{start.day}日~{last.month}月{last.day}日"
 
 
-def _member_info(session, event) -> tuple[str, str, str]:
-    """返回 (qq, display_name, platform)。"""
-    qq = event.get_user_id()
-    name = getattr(event.sender, "nickname", None) or qq
-    member = session.get(Member, qq)
-    platform = ""
-    if member is not None:
-        name = member.display_name
-        platform = member.platform
-    return qq, name, platform
+async def build_range(qq: str, nickname: str, range_text: str, is_daily: bool) -> str:
+    """构建历史区间查询文本（命令 handler 与自然语言路由共用）。
+
+    is_daily=True 返回逐日明细，否则返回区间汇总。
+    """
+    rng = summary.parse_range(range_text)
+    if rng is None:
+        return _USAGE
+    start, end, label = rng
+
+    session = get_session()
+    try:
+        member = session.get(Member, qq)
+        platform = ""
+        if member is not None:
+            nickname = member.display_name
+            platform = member.platform
+    finally:
+        session.close()
+
+    await _maybe_sync_today(qq, platform, start, end)
+
+    if is_daily:
+        days = await asyncio.to_thread(summary.compute_daily_list, qq, start, end)
+        return _format_daily_list(nickname, label, days)
+
+    s = await asyncio.to_thread(summary.compute_member_summary, qq, start, end)
+    if s["active_days"] == 0 and s["distance_km"] <= 0:
+        return f"{nickname} {label}暂无运动记录"
+    return _format_summary(nickname, label, _span(start, end), s)
 
 
 async def _maybe_sync_today(qq: str, platform: str, start: date, end: date) -> None:
@@ -77,23 +97,14 @@ def _format_daily_list(name: str, label: str, days: list[dict]) -> str:
 
 @data_cmd.handle()
 async def handle_data(bot: Bot, event: MessageEvent, args: Message = CommandArg()):
-    rng = summary.parse_range(args.extract_plain_text())
-    if rng is None:
-        await data_cmd.finish(_USAGE)
-    start, end, label = rng
-
-    session = get_session()
     try:
-        qq, name, platform = _member_info(session, event)
-    finally:
-        session.close()
-
-    try:
-        await _maybe_sync_today(qq, platform, start, end)
-        s = await asyncio.to_thread(summary.compute_member_summary, qq, start, end)
-        if s["active_days"] == 0 and s["distance_km"] <= 0:
-            await data_cmd.finish(f"{name} {label}暂无运动记录")
-        await data_cmd.finish(_format_summary(name, label, _span(start, end), s))
+        text = await build_range(
+            event.get_user_id(),
+            getattr(event.sender, "nickname", None),
+            args.extract_plain_text(),
+            False,
+        )
+        await data_cmd.finish(text)
     except (FinishedException, ActionFailed):
         raise
     except Exception as e:
@@ -103,21 +114,14 @@ async def handle_data(bot: Bot, event: MessageEvent, args: Message = CommandArg(
 
 @history_cmd.handle()
 async def handle_history(bot: Bot, event: MessageEvent, args: Message = CommandArg()):
-    rng = summary.parse_range(args.extract_plain_text())
-    if rng is None:
-        await history_cmd.finish(_USAGE)
-    start, end, label = rng
-
-    session = get_session()
     try:
-        qq, name, platform = _member_info(session, event)
-    finally:
-        session.close()
-
-    try:
-        await _maybe_sync_today(qq, platform, start, end)
-        days = await asyncio.to_thread(summary.compute_daily_list, qq, start, end)
-        await history_cmd.finish(_format_daily_list(name, label, days))
+        text = await build_range(
+            event.get_user_id(),
+            getattr(event.sender, "nickname", None),
+            args.extract_plain_text(),
+            True,
+        )
+        await history_cmd.finish(text)
     except (FinishedException, ActionFailed):
         raise
     except Exception as e:

@@ -81,22 +81,22 @@ def _format_manual(name: str, d: date, rec, total_km: float) -> str:
     return head + "\n".join(lines)
 
 
-@query_cmd.handle()
-async def handle_query(bot: Bot, event: MessageEvent):
-    qq = event.get_user_id()
-    name = getattr(event.sender, "nickname", None) or qq
+async def build_today(qq: str, nickname: str) -> str:
+    """构建「今日」查询结果文本（命令 handler 与自然语言路由共用，不直接 finish）。
+
+    已绑定平台走接口同步；未绑定读当日截图记录 + 累计里程。
+    """
     today = timeutil.today()
     session = get_session()
     try:
         member = session.get(Member, qq)
-        # 优先用库里的显示昵称（自定义 > QQ 昵称），保证「今日」与榜单显示一致
         if member is not None:
-            name = member.display_name
+            nickname = member.display_name
 
         # 已绑定平台 → 走平台接口同步
         if member is not None and member.platform:
             stats = await asyncio.to_thread(sync.sync_daily, member.qq, member.platform, today)
-            await query_cmd.finish(f"{name} 今日运动数据：\n{_format_stats(stats)}")
+            return f"{nickname} 今日运动数据：\n{_format_stats(stats)}"
 
         # 未绑定 → 读截图记录（当日明细 + 累计里程）
         rec = session.execute(
@@ -109,14 +109,25 @@ async def handle_query(bot: Bot, event: MessageEvent):
         total = sync.get_manual_distance(qq, session)
 
         if rec is None and total <= 0:
-            await query_cmd.finish(
+            return (
                 "你还没有任何运动数据，试试下面任一方式：\n"
                 "① 绑定平台：发「绑定 garmin」（佳明，私聊填账号）或「绑定 coros」（高驰，私密授权链接）\n"
                 "② 其他平台（无开放接口的 App）：直接发运动截图，我会自动识别并记入今日数据和排行\n"
                 "绑定后发「今日」即可查询当日数据"
             )
 
-        await query_cmd.finish(_format_manual(name, today, rec, total))
+        return _format_manual(nickname, today, rec, total)
+    finally:
+        session.close()
+
+
+@query_cmd.handle()
+async def handle_query(bot: Bot, event: MessageEvent):
+    qq = event.get_user_id()
+    name = getattr(event.sender, "nickname", None) or qq
+    try:
+        text = await build_today(qq, name)
+        await query_cmd.finish(text)
     except (FinishedException, ActionFailed):
         # finish() 正常终止 / 发送超时（NapCat 偶发）会抛此异常，不属于查询失败，直接放行
         raise
@@ -127,5 +138,3 @@ async def handle_query(bot: Bot, event: MessageEvent):
     except Exception as e:
         logger.exception(f"查询失败: {e}")
         await query_cmd.finish(f"查询失败：{e}")
-    finally:
-        session.close()

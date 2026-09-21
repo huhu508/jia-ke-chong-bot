@@ -173,6 +173,12 @@ async def handle_image(bot: Bot, event: MessageEvent):
         data = parsers.parse_activity_from_boxes(result)
         if not data:
             data = parsers.parse_activity(text)
+        # 多模态兜底：本地 OCR 一个字段都没认出来时，用视觉模型再看一次；
+        # 失败返回 None → 保持空 dict，照常走后续「未识别出数据，静默跳过」
+        if not data:
+            data = await asyncio.to_thread(llm.vision_extract, img_bytes) or {}
+            if data:
+                logger.info(f"[图片识别] qq={qq} 本地 OCR 未命中，视觉兜底结果: {data}")
     except Exception as e:
         logger.warning(f"[图片识别] qq={qq} 解析失败: {e}")
         return

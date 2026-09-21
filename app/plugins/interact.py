@@ -1,13 +1,19 @@
 """帮助与菜单：/帮助 查看命令（两级菜单）、@机器人 回复菜单 / 运动问答。"""
 
 import asyncio
+import time
 
 from nonebot import on_command, on_message
 from nonebot.adapters.onebot.v11 import Bot, GroupMessageEvent, Message, MessageEvent
+from nonebot.log import logger
 from nonebot.params import CommandArg
 from nonebot.rule import to_me
 
 from ..services import llm
+from .history import build_range
+from .query import build_today
+from .ranking import build_ranking
+from .summary import build_period
 
 # 首页菜单：只给四大类入口，避免一上来刷一大屏（群里反馈「字好多」）。
 HELP_OVERVIEW = (
@@ -18,7 +24,7 @@ HELP_OVERVIEW = (
     "· 发「帮助 绑定」看绑定流程\n"
     "· 发「帮助 ai」看 AI 玩法\n"
     "· 发「帮助 其它」看抽奖 / 管理\n"
-    "有问题直接 @我 即可。"
+    "有问题或想查数据，直接 @我 说一句即可。"
 )
 
 # 分类详情：按需展开，只有被点名时才显示。
@@ -32,8 +38,8 @@ _HELP_DETAILS = {
         "· 鼓励我 / 建议（可加 月）—— AI 鼓励 / 训练建议\n"
         "· 诊断（可加 5k 25:00）—— 负荷 / 恢复 / 配速诊断\n"
         "· 排行 / 周榜 / 月榜 —— 今日 / 本周 / 本月三榜\n"
-        "· 数据 8月 / 数据 近30天 —— 查任意时间段汇总\n"
-        "· 历史 8月 —— 查逐日明细\n"
+        "· 数据 9月 / 数据 近30天 —— 查任意时间段汇总\n"
+        "· 历史 9月 —— 查逐日明细\n"
         "· 删除打卡 —— 撤销最近一次截图打卡"
     ),
     "绑定": (
@@ -47,7 +53,8 @@ _HELP_DETAILS = {
     "ai": (
         "🤖 AI 助手\n"
         "━━━━━━━━━━━━\n"
-        "· @我 + 运动问题 —— 配速 / 跑量 / 恢复等问答（只聊运动）\n"
+        "· @我 + 问题 —— 运动 / 伤病 / 疲劳 / 天气等问答\n"
+        "· @我 + 一句话 —— 也能查数据（今天跑了多少 / 这周排行）\n"
         "· 截图打卡 —— 记录成功后 AI 补一句点评"
     ),
     "其它": (
@@ -90,7 +97,77 @@ async def handle_help(bot: Bot, event: MessageEvent, args: Message = CommandArg(
     await help_cmd.finish(HELP_OVERVIEW)
 
 
-# @机器人 → 无正文回首页菜单；带问题则走运动问答（LLM，失败回落菜单/提示）。
+# ---------------------------------------------------------------------------
+# 多轮对话上下文（内存态，per-user，TTL 过期）
+# 只存最近几轮纯文本问答，不落盘、不跨重启；超时即清空，避免长期占用内存。
+# ---------------------------------------------------------------------------
+
+_CHAT_HISTORY: dict[str, list[dict]] = {}
+_CHAT_LAST: dict[str, float] = {}
+_CHAT_TTL = 600.0  # 10 分钟无交互即清空上下文
+_MAX_TURNS = 6  # 最多保留 6 条（3 轮问答）
+
+
+def _chat_history(qq: str) -> list[dict]:
+    now = time.time()
+    if now - _CHAT_LAST.get(qq, 0.0) > _CHAT_TTL:
+        _CHAT_HISTORY.pop(qq, None)
+        return []
+    return list(_CHAT_HISTORY.get(qq, []))
+
+
+def _remember(qq: str, question: str, answer: str) -> None:
+    hist = _CHAT_HISTORY.setdefault(qq, [])
+    hist.append({"role": "user", "content": question})
+    hist.append({"role": "assistant", "content": answer})
+    if len(hist) > _MAX_TURNS:
+        del hist[: len(hist) - _MAX_TURNS]
+    _CHAT_LAST[qq] = time.time()
+
+
+async def _dispatch_query(event: GroupMessageEvent, question: str) -> str | None:
+    """自然语言查数据路由：意图分类 → 调对应 build 函数。
+
+    命中数据查询返回结果文本；非查询意图或任何异常返回 None（由调用方降级纯问答）。
+    """
+    intent = await asyncio.to_thread(llm.classify_intent, question)
+    if not intent:
+        return None
+    kind = intent.get("intent")
+    qq = event.get_user_id()
+    nickname = getattr(event.sender, "nickname", None)
+
+    try:
+        if kind == "today":
+            return await build_today(qq, nickname)
+        if kind == "weekly":
+            return await build_period(qq, nickname, "周", "data")
+        if kind == "monthly":
+            return await build_period(qq, nickname, "月", "data")
+        if kind == "summary":
+            period = "月" if intent.get("period") == "month" else "周"
+            return await build_period(qq, nickname, period, "ai")
+        if kind == "advise":
+            period = "月" if intent.get("period") == "month" else "周"
+            return await build_period(qq, nickname, period, "advise")
+        if kind == "encourage":
+            return await build_period(qq, nickname, "周", "encourage")
+        if kind == "ranking":
+            scope = intent.get("scope") or "day"
+            if scope not in ("day", "week", "month"):
+                scope = "day"
+            return await build_ranking(scope)
+        if kind == "data_range":
+            return await build_range(qq, nickname, intent.get("range", ""), False)
+        if kind == "history":
+            return await build_range(qq, nickname, intent.get("range", ""), True)
+    except Exception as e:
+        logger.warning(f"自然语言查询路由失败（降级问答）: {e}")
+        return None
+    return None
+
+
+# @机器人 → 无正文回首页菜单；带问题则先走自然语言查数据路由，再走运动问答（LLM）。
 # 优先级最低（99），只有没被其它命令处理时才兜底。
 at_me = on_message(rule=to_me(), priority=99, block=True)
 
@@ -102,7 +179,18 @@ async def handle_at(bot: Bot, event: MessageEvent):
     question = event.get_plaintext().strip()
     if not question:
         await at_me.finish(HELP_OVERVIEW)
-    text = await asyncio.to_thread(llm.answer_question, question)
+
+    qq = event.get_user_id()
+
+    # 1) 自然语言查数据：命中查询意图直接给结果（如「我今天跑了多少」「这周排行」）
+    text = await _dispatch_query(event, question)
     if text:
+        await at_me.finish(text)
+
+    # 2) 多轮问答：带短期上下文（最近几轮），回答后记住本轮
+    history = _chat_history(qq)
+    text = await asyncio.to_thread(llm.answer_question, question, history)
+    if text:
+        _remember(qq, question, text)
         await at_me.finish(text)
     await at_me.finish("这个问题我暂时答不上来（AI 未接入或出错），发「帮助」看我能做什么吧")
