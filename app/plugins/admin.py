@@ -1,5 +1,5 @@
 import asyncio
-from datetime import date, timedelta
+from datetime import timedelta
 
 from nonebot import get_driver, on_command
 from nonebot.adapters.onebot.v11 import (
@@ -15,7 +15,7 @@ from sqlalchemy import func, select
 from ..db import get_session
 from ..models.manual_distance import ManualDistance
 from ..models.member import Member
-from ..services import credentials, sync
+from ..services import credentials, sync, timeutil
 from ..services.member import get_or_create_member
 from ..services.providers import VALID_PLATFORMS, get_provider
 
@@ -63,7 +63,7 @@ async def _backfill_async(qqs: list[str] | None = None) -> None:
     finally:
         session.close()
 
-    today = date.today()
+    today = timeutil.today()
     start = today - timedelta(days=BACKFILL_DAYS - 1)
     end = today + timedelta(days=1)
     for qq, platform in targets:

@@ -12,7 +12,7 @@ from urllib.parse import parse_qs, urlencode, urlparse
 import httpx
 from nonebot.log import logger
 
-from .. import crypto
+from .. import crypto, timeutil
 from .base import DailyStats, SportProvider
 
 
@@ -251,7 +251,7 @@ class CorosProvider(SportProvider):
     # ------------------------------------------------------------------
 
     def fetch_daily(self, qq: str, d: date) -> DailyStats:
-        delta = (date.today() - d).days
+        delta = (timeutil.today() - d).days
         days = min(30, max(2, delta + 2))
         text = self._query_daily_health(qq, days)
         stats = self._parse_daily(text, d)

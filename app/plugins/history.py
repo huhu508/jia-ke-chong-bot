@@ -1,7 +1,7 @@
 """历史数据查询：发「数据 [时间段]」看汇总、「历史 [时间段]」看逐日明细。
 
 与「周数据 / 月数据」互补：那两个只查当前周/月，这里查任意历史区间。
-时间段支持：近30天 / 近3个月 / 8月 / 2026年8月 / 今年 / 去年 / 上月 / 本周 / 本月。
+时间段支持：近30天 / 近3个月 / 8月 / 2026年8月 / 上月 / 本周 / 本月。
 """
 
 import asyncio
@@ -15,7 +15,7 @@ from nonebot.params import CommandArg
 
 from ..db import get_session
 from ..models.member import Member
-from ..services import summary, sync
+from ..services import summary, sync, timeutil
 from ..services.cheers import format_pace
 from .summary import _format_summary
 
@@ -25,9 +25,9 @@ history_cmd = on_command("历史", aliases={"明细", "逐日", "训练记录"},
 _USAGE = (
     "📊 用法：\n"
     "· 数据 8月 —— 查某月汇总\n"
-    "· 数据 近30天 / 今年 —— 查时间段汇总\n"
+    "· 数据 近30天 / 近3个月 —— 查时间段汇总\n"
     "· 历史 8月 —— 查某月逐日明细\n"
-    "支持：近N天 / 近N个月 / X月 / 2026年X月 / 今年 / 去年 / 上月 / 本周 / 本月"
+    "支持：近N天 / 近N个月 / X月 / 2026年X月 / 上月 / 本周 / 本月"
 )
 
 
@@ -50,9 +50,9 @@ def _member_info(session, event) -> tuple[str, str, str]:
 
 async def _maybe_sync_today(qq: str, platform: str, start: date, end: date) -> None:
     """区间覆盖今天且已绑定平台时，先补拉今天，保证当天数据新鲜；失败不阻断。"""
-    if platform and start <= date.today() < end:
+    if platform and start <= timeutil.today() < end:
         try:
-            await asyncio.to_thread(sync.sync_daily, qq, platform, date.today())
+            await asyncio.to_thread(sync.sync_daily, qq, platform, timeutil.today())
         except Exception as e:
             logger.warning(f"历史查询同步今日失败（用已有数据）: {e}")
 

@@ -12,8 +12,8 @@ class Settings(BaseSettings):
     # 每日运动排行播报（默认每晚 23:00，本机本地时间即北京时间）
     broadcast_hour: int = 23
     broadcast_minute: int = 0
-    # 原始训练明细保留天数（0 = 永久保留，不清理）。历史明细长期留存供个人复盘/历史查询。
-    retention_days: int = 0
+    # 原始训练明细保留天数（365 = 保留最近一年，超过自动清除）。历史明细供个人复盘/历史查询。
+    retention_days: int = 365
     # 显式指定播报群号列表（JSON 数组）；留空 = 自动播报到机器人出现过的所有群
     broadcast_groups: list[int] = []
     # 群使用白名单（群号列表）：仅这些群的成员可触发命令 / 被每日播报。

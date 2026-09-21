@@ -17,13 +17,14 @@
 """
 
 import re
-from datetime import date, timedelta
+from datetime import timedelta
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ..models.daily_record import DailyRecord
 from .cheers import format_pace
+from . import timeutil
 
 # 诊断需要的最少周数（配速趋势、慢性负荷都依赖它）
 _WEEKS = 4
@@ -157,13 +158,13 @@ def _fmt_duration(sec: float) -> str:
 
 
 def _recent_records(session: Session, qq: str, days: int) -> list[DailyRecord]:
-    start = date.today() - timedelta(days=days - 1)
+    start = timeutil.today() - timedelta(days=days - 1)
     return (
         session.execute(
             select(DailyRecord).where(
                 DailyRecord.member_qq == qq,
                 DailyRecord.record_date >= start,
-                DailyRecord.record_date <= date.today(),
+                DailyRecord.record_date <= timeutil.today(),
             )
         )
         .scalars()
@@ -188,7 +189,7 @@ def compute_diagnosis(session: Session, qq: str, race: tuple[float, int] | None 
     返回 dict：records / weekly / acwr / recovery / pace_trend / race（含 vo2max、
     predictions、paces）。数据不足处用 None 标记，由 format 层决定是否展示。
     """
-    today = date.today()
+    today = timeutil.today()
     records = _recent_records(session, qq, _WEEKS * 7)
 
     # 近 4 周按 7 天桶（bucket[0] 为最近一周）统计跑量 / 配速

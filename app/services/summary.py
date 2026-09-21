@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session
 
 from ..db import get_session
 from ..models.daily_record import DailyRecord
+from . import timeutil
 
 
 def compute_member_summary(
@@ -96,13 +97,14 @@ def compute_member_summary(
 def parse_range(text: str) -> tuple[date, date, str] | None:
     """把时间段文本解析成 (start, end, label)，end 为不含当天；无法识别返回 None。
 
-    支持：近 N 天 / 近 N 个月 / X月（今年，未来月视为去年）/ YYYY年X月 / YYYY年 /
-    今年 / 去年 / 上月 / 本周 / 本月。供「数据」「历史」命令复用。
+    支持：近 N 天 / 近 N 个月 / X月（今年，未来月视为去年）/ YYYY年X月 /
+    上月 / 本周 / 本月。刻意不含「年」粒度（一整年跨度太大，且明细只保留一年）。
+    供「数据」「历史」命令复用。
     """
     t = (text or "").strip()
     if not t:
         return None
-    today = date.today()
+    today = timeutil.today()
 
     # 近 N 天：近30天 / 最近30天 / 过去7天
     m = re.search(r"(?:近|最近|过去)\s*(\d+)\s*天", t)
@@ -134,17 +136,7 @@ def parse_range(text: str) -> tuple[date, date, str] | None:
         end = date(y + 1, 1, 1) if mo == 12 else date(y, mo + 1, 1)
         return start, end, f"{y}年{mo}月"
 
-    # 指定年：2026年（不含「月」）
-    m = re.search(r"(\d{4})\s*年", t)
-    if m:
-        y = int(m.group(1))
-        return date(y, 1, 1), date(y + 1, 1, 1), f"{y}年"
-
-    # 快捷词
-    if "今年" in t:
-        return date(today.year, 1, 1), today + timedelta(days=1), "今年"
-    if "去年" in t:
-        return date(today.year - 1, 1, 1), date(today.year, 1, 1), "去年"
+    # 快捷词（刻意不含「年」粒度：一整年跨度太大，且明细只保留最近一年）
     if "上月" in t:
         y, mo = today.year, today.month - 1
         if mo == 0:

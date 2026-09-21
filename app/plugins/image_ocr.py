@@ -7,7 +7,6 @@ import asyncio
 import base64
 import hashlib
 import time
-from datetime import date
 from io import BytesIO
 from pathlib import Path
 
@@ -20,7 +19,7 @@ from PIL import Image
 
 from ..db import get_session
 from ..models.member import Member
-from ..services import cheers, llm, parsers, sync
+from ..services import cheers, llm, parsers, sync, timeutil
 from ..services.member import get_or_create_member
 from ..services.ocr import recognize_boxes
 from ..services.providers.base import DailyStats
@@ -253,11 +252,11 @@ async def handle_image(bot: Bot, event: MessageEvent):
         # 截图记录也进当日明细，让未绑定成员出现在每日排行里。
         # parsers 返回 dict，统一转成 DailyStats（过滤非模型字段，防御未来新增键）。
         stats = DailyStats(
-            date=date.today(),
+            date=timeutil.today(),
             **{k: v for k, v in data.items() if k in DailyStats.model_fields},
         )
-        sync.record_manual_activity(member, date.today(), stats, session)
-        sync.log_checkin(qq, date.today(), data["distance_km"], session)
+        sync.record_manual_activity(member, timeutil.today(), stats, session)
+        sync.log_checkin(qq, timeutil.today(), data["distance_km"], session)
         _mark_seen(qq, img_md5)
     except Exception as e:
         logger.exception(f"[图片识别] qq={qq} 记录失败: {e}")

@@ -17,7 +17,7 @@ from nonebot.params import CommandArg
 
 from ..db import get_session
 from ..models.member import Member
-from ..services import llm, summary, sync
+from ..services import llm, summary, sync, timeutil
 from ..services.cheers import format_pace
 
 weekly_cmd = on_command("周数据", aliases={"本周数据", "我的周数据"}, priority=5, block=True)
@@ -29,7 +29,7 @@ advise_cmd = on_command("建议", aliases={"训练建议", "运动建议", "怎�
 
 def _period_of(kind: str) -> tuple[str, date, date, str]:
     """按 kind（"周"/"月"）返回 (标签, start, end, 展示范围)。end 为不含当天。"""
-    today = date.today()
+    today = timeutil.today()
     if kind == "周":
         start = today - timedelta(days=today.weekday())  # 本周一
         return (
@@ -65,7 +65,7 @@ async def _gather(event: MessageEvent, kind: str):
     # 已绑定平台：先补拉今天，保证当天数据新鲜；失败不阻断，退回已有数据
     if platform:
         try:
-            await asyncio.to_thread(sync.sync_daily, qq, platform, date.today())
+            await asyncio.to_thread(sync.sync_daily, qq, platform, timeutil.today())
         except Exception as e:
             logger.warning(f"周期数据同步今日失败（用已有数据）: {e}")
 

@@ -10,7 +10,7 @@ from sqlalchemy import select
 from ..db import get_session
 from ..models.daily_record import DailyRecord
 from ..models.member import Member
-from ..services import sync
+from ..services import sync, timeutil
 from ..services.cheers import format_pace
 from ..services.providers.base import DailyStats
 
@@ -85,7 +85,7 @@ def _format_manual(name: str, d: date, rec, total_km: float) -> str:
 async def handle_query(bot: Bot, event: MessageEvent):
     qq = event.get_user_id()
     name = getattr(event.sender, "nickname", None) or qq
-    today = date.today()
+    today = timeutil.today()
     session = get_session()
     try:
         member = session.get(Member, qq)

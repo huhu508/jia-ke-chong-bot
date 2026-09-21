@@ -12,6 +12,7 @@ from ..models.manual_distance import ManualDistance
 from ..models.member import Member
 from .providers import get_provider
 from .providers.base import DailyStats
+from . import timeutil
 
 
 def _write_record(
@@ -169,7 +170,7 @@ def add_manual_distance(member: Member, distance_km: float, session: Session) ->
         session.add(rec)
 
     # 跨周重置：当前周一与记录的 week_start 不一致时，本周累计清零、更新周起始
-    today = date.today()
+    today = timeutil.today()
     this_monday = today - timedelta(days=today.weekday())
     if rec.week_start != this_monday:
         rec.week_start = this_monday
@@ -241,7 +242,7 @@ def sync_today_all() -> int:
     finally:
         session.close()
 
-    today = date.today()
+    today = timeutil.today()
     ok = 0
     for qq, platform in targets:
         try:

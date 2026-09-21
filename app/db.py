@@ -1,7 +1,7 @@
 import logging
 from pathlib import Path
 
-from sqlalchemy import create_engine, inspect, text
+from sqlalchemy import create_engine, event, inspect, text
 from sqlalchemy.orm import Session, sessionmaker
 
 from . import models  # noqa: F401  确保所有模型被导入并注册到 Base.metadata
@@ -16,6 +16,19 @@ _engine_kwargs: dict = {"future": True}
 if settings.db_url.startswith("sqlite"):
     _engine_kwargs["connect_args"] = {"timeout": 30}
 engine = create_engine(settings.db_url, **_engine_kwargs)
+
+# SQLite 并发读写：WAL 让读不阻塞写（后台回填历史 + 用户查询可并行），
+# synchronous=NORMAL 在 WAL 下既安全又快。仅对 SQLite 生效。
+if settings.db_url.startswith("sqlite"):
+
+    @event.listens_for(engine, "connect")
+    def _set_sqlite_pragma(dbapi_conn, _record):
+        cur = dbapi_conn.cursor()
+        cur.execute("PRAGMA journal_mode=WAL")
+        cur.execute("PRAGMA synchronous=NORMAL")
+        cur.close()
+
+
 SessionLocal = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)
 
 # 新增列迁移清单：表名 -> {列名: "SQL类型 DEFAULT 默认值"}。

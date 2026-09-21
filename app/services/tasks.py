@@ -16,7 +16,7 @@ from sqlalchemy import select
 from ..config import settings
 from ..db import get_session
 from ..models.group import Group
-from . import ranking, retention, sync
+from . import ranking, retention, sync, timeutil
 
 driver = get_driver()
 
@@ -32,7 +32,7 @@ def _discover_groups() -> list[int]:
 
 async def _run_broadcast() -> None:
     """计算并播报排行：每日今日榜；周日追加周榜、月末追加月榜，逐段独立发送。"""
-    today = datetime.date.today()
+    today = timeutil.today()
     day = datetime.timedelta(days=1)
 
     # 播报前清理过期明细（retention_days<=0 时永久保留、自动跳过），幂等、每日执行
@@ -123,7 +123,7 @@ async def _daily_broadcast_loop() -> None:
     hour = settings.broadcast_hour
     minute = settings.broadcast_minute
     while True:
-        now = datetime.datetime.now()
+        now = timeutil.now()
         target = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
         if now >= target:
             target += datetime.timedelta(days=1)

@@ -82,9 +82,14 @@ def test_parse_range_未来月视为去年():
 
 def test_parse_range_快捷词():
     today = date.today()
-    assert parse_range("今年")[0] == date(today.year, 1, 1)
-    assert parse_range("今年")[1] == today + timedelta(days=1)
     assert parse_range("本月")[0] == date(today.year, today.month, 1)
+
+
+def test_parse_range_年粒度已删除():
+    assert parse_range("今年") is None
+    assert parse_range("去年") is None
+    assert parse_range("2026年") is None
+    assert parse_range("2026") is None
 
 
 def test_parse_range_无效():

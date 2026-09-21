@@ -7,7 +7,8 @@
 """
 
 import random
-from datetime import datetime
+
+from . import timeutil
 
 # ---------------------------------------------------------------------------
 # 通用开场 / 结尾（无具体数据可用时的兜底池）
@@ -48,7 +49,7 @@ _GREETINGS = [
 
 
 def _greeting() -> str:
-    h = datetime.now().hour
+    h = timeutil.now().hour
     for until, text in _GREETINGS:
         if h < until:
             return text
