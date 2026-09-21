@@ -5,6 +5,10 @@ from sqlalchemy.orm import Mapped, mapped_column
 
 from .base import Base
 
+# 无效昵称占位：群临时会话拿不到真实昵称时 NapCat 会返回这些值，不应作为显示名。
+# 统一小写比较；「临时会话」是主要来源（成员通过群临时会话绑定平台时触发）。
+INVALID_NICKNAMES = frozenset({"", "临时会话", "匿名", "匿名用户", "qq用户", "null", "none", "unknown"})
+
 
 class Member(Base):
     """群成员 -> 运动平台账号的绑定关系。"""
@@ -24,5 +28,8 @@ class Member(Base):
 
     @property
     def display_name(self) -> str:
-        """显示用昵称：自定义昵称 > QQ 昵称 > QQ 号。"""
-        return self.custom_nickname or self.nickname or self.qq
+        """显示用昵称：自定义昵称 > QQ 昵称 > QQ 号；QQ 昵称为无效占位（临时会话）时跳过。"""
+        name = self.custom_nickname or self.nickname or ""
+        if name.strip().lower() in INVALID_NICKNAMES:
+            name = ""
+        return name or self.qq

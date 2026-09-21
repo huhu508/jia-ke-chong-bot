@@ -12,11 +12,13 @@ from nonebot.log import logger
 from nonebot.params import CommandArg
 from sqlalchemy import func, select
 
+from ..config import settings
 from ..db import get_session
+from ..models.group import Group
 from ..models.manual_distance import ManualDistance
 from ..models.member import Member
-from ..services import credentials, sync, timeutil
-from ..services.member import get_or_create_member
+from ..services import checkin, credentials, sync, timeutil
+from ..services.member import get_or_create_member, normalize_nickname
 from ..services.providers import VALID_PLATFORMS, get_provider
 
 bind_cmd = on_command("绑定", priority=5, block=True)
@@ -25,6 +27,7 @@ confirm_cmd = on_command("绑定确认", priority=5, block=True)
 unbind_cmd = on_command("解绑", priority=5, block=True)
 status_cmd = on_command("机器状态", priority=5, block=True)
 sync_all_cmd = on_command("同步数据", priority=5, block=True)
+refresh_names_cmd = on_command("刷新昵称", aliases={"修复昵称", "同步昵称"}, priority=5, block=True)
 garmin_bind_cmd = on_command("garmin绑定", aliases={"佳明绑定"}, priority=5, block=True)
 
 # 平台展示名（绑定提示 / 状态 / 我的绑定 三处共用）
@@ -107,6 +110,20 @@ async def _send_private_robust(
         if idx == 0:
             logger.info(f"群临时会话发送未成功，退回好友私聊（qq={user_id}）")
     return False
+
+
+async def notify_gift_claim(bot: Bot, qq: str, name: str, rank: int, gid: int | None) -> None:
+    """第 GIFT_DAYS 天礼物被自动领取时，通知团长（superuser）安排发货。"""
+    for su in get_driver().config.superusers:
+        try:
+            await _send_private_robust(
+                bot,
+                int(su),
+                gid,
+                f"🎁 {name}（QQ {qq}）达成第 {checkin.GIFT_DAYS} 天打卡，自动领取小红书惊喜礼物（第 {rank} 位），请安排发货～",
+            )
+        except Exception as e:
+            logger.warning(f"通知团长礼物领取失败: {e}")
 
 
 @bind_cmd.handle()
@@ -333,3 +350,53 @@ async def handle_sync_all(bot: Bot, event: MessageEvent):
         f"已开始后台同步 {len(members)} 人的历史数据（近 {BACKFILL_DAYS} 天），"
         "完成后发「排行 / 周榜 / 月榜」即可看到正确数据"
     )
+
+
+@refresh_names_cmd.handle()
+async def handle_refresh_names(bot: Bot, event: MessageEvent):
+    if not _is_superuser(event):
+        await refresh_names_cmd.finish("仅管理员可执行")
+
+    # 目标群：优先白名单，否则机器人出现过的群
+    gids: list[int] = [int(g) for g in settings.allowed_groups]
+    if not gids:
+        session = get_session()
+        try:
+            gids = [int(g.group_id) for g in session.execute(select(Group)).scalars().all()]
+        finally:
+            session.close()
+    if not gids:
+        await refresh_names_cmd.finish("没有可查询的群")
+
+    fixed = 0
+    for gid in gids:
+        try:
+            members = await bot.get_group_member_list(group_id=gid)
+        except Exception as e:
+            logger.warning(f"拉取群 {gid} 成员列表失败: {e}")
+            continue
+        # 群名片优先（群里更可识别），否则 QQ 昵称；无效占位一律清洗掉
+        real: dict[str, str] = {}
+        for m in members:
+            qq = str(m.get("user_id", ""))
+            name = normalize_nickname((m.get("card") or "") or (m.get("nickname") or ""))
+            if qq and name:
+                real[qq] = name
+        if not real:
+            continue
+        session = get_session()
+        try:
+            for qq, name in real.items():
+                member = session.get(Member, qq)
+                if member is None:
+                    continue
+                raw = (member.nickname or "").strip()
+                # 只修正「临时会话」这类非空无效占位；空昵称本就会退回 QQ 号，无需处理
+                if raw and not normalize_nickname(raw):
+                    member.nickname = name
+                    fixed += 1
+            session.commit()
+        finally:
+            session.close()
+
+    await refresh_names_cmd.finish(f"✅ 昵称刷新完成：修正 {fixed} 个无效昵称（临时会话等）")

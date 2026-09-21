@@ -23,6 +23,7 @@ from ..services import checkin, cheers, llm, parsers, sync, timeutil
 from ..services.member import get_or_create_member
 from ..services.ocr import recognize_boxes
 from ..services.providers.base import DailyStats
+from .admin import notify_gift_claim
 
 
 def _has_image(event) -> bool:
@@ -253,6 +254,7 @@ async def handle_image(bot: Bot, event: MessageEvent):
     milestone_hits: list[int] = []
     fest = None
     festival_km = 0.0
+    gift_rank: int | None = None
     lottery_result: tuple[int, list[str]] | None = None
     session = get_session()
     try:
@@ -270,9 +272,10 @@ async def handle_image(bot: Bot, event: MessageEvent):
         sync.log_checkin(qq, today_d, data["distance_km"], session)
         _mark_seen(qq, img_md5)
 
-        # 打卡彩蛋：里程碑 / 节日+特殊距离 / 群抽奖（幂等，状态表保证只触发一次）
+        # 打卡彩蛋：里程碑 / 礼物 / 节日+特殊距离 / 群抽奖（幂等，状态表保证只触发一次）
         checkin_total = checkin.total_days(qq, session)
         milestone_hits = checkin.crossed_milestones(qq, checkin_total, session)
+        gift_rank = checkin.auto_gift(qq, checkin_total, session)
         fest = checkin.match_festival(today_d, data.get("distance_km", 0.0))
         festival_km = data.get("distance_km", 0.0)
         lt = checkin.check_lottery(session)
@@ -298,6 +301,13 @@ async def handle_image(bot: Bot, event: MessageEvent):
     for m in milestone_hits:
         cheer = await asyncio.to_thread(llm.milestone_cheer, name, m)
         reply += f"\n\n🎉 {cheer or f'达成第 {m} 次打卡里程碑，坚持就是胜利！'}"
+    # 第 GIFT_DAYS 天礼物：自动领取（先到先得），并通知团长
+    if gift_rank is not None:
+        reply += (
+            f"\n\n🎁 恭喜 {name}！你是第 {gift_rank} 位达成第 {checkin.GIFT_DAYS} 天打卡的跑友，"
+            "自动领取「小红书惊喜小礼物」，已通知团长安排发货～"
+        )
+        await notify_gift_claim(bot, qq, name, gift_rank, getattr(event, "group_id", None))
     # 节日+特殊距离彩蛋
     if fest is not None:
         fallback = f"{fest['name']}快乐！{festival_km} km 跑得漂亮，继续加油～"

@@ -160,3 +160,20 @@ def gift_claims(session: Session) -> int:
 def claim_gift(qq: str, session: Session) -> bool:
     """尝试领取第 GIFT_DAYS 天礼物（先到先得）。返回是否为首次领取。"""
     return _mark_state(f"gift:{GIFT_DAYS}:{qq}", session)
+
+
+def auto_gift(qq: str, total: int, session: Session) -> int | None:
+    """累计打卡首次达到 GIFT_DAYS 且名额未满时自动领取礼物，返回领取序位（1 起）；否则 None。
+
+    幂等由 CheckinState（gift:<GIFT_DAYS>:<qq>）保证，重复触发不会重复领取。
+    供截图/今日路径在成员跨过 GIFT_DAYS 时自动触发，无需成员手动发「领礼物」。
+    """
+    if total < GIFT_DAYS:
+        return None
+    if session.get(CheckinState, f"gift:{GIFT_DAYS}:{qq}") is not None:
+        return None
+    before = gift_claims(session)
+    if before >= GIFT_QUOTA:
+        return None
+    claim_gift(qq, session)
+    return before + 1

@@ -61,7 +61,6 @@ _HELP_DETAILS = {
         "🎲 其它\n"
         "━━━━━━━━━━━━\n"
         "· 抽奖 [N] 候选… / 骰子 / 随机数 —— 群互动\n"
-        "· 打卡 / 领礼物 —— 打卡天数、第 100 天兑换小红书惊喜礼物（先到先得）\n"
         "· 昵称 xxx —— 设置自己的显示昵称（昵称 清空 恢复）\n"
         "· 机器状态 / 同步数据 —— 管理员"
     ),
@@ -72,7 +71,7 @@ _HELP_TOPIC_KEYS = {
     "查询": ("查询", "query", "今日", "步数", "周数据", "月数据", "排行", "周榜", "月榜", "总结", "建议", "诊断", "鼓励", "删除打卡", "撤销打卡", "数据", "历史", "明细", "训练记录"),
     "绑定": ("绑定", "bind", "coros", "garmin", "佳明", "高驰", "解绑", "我的绑定"),
     "ai": ("ai", "助手", "问答", "问题", "聊天", "人工智能"),
-    "其它": ("其它", "其他", "抽奖", "骰子", "随机", "管理", "机器状态", "同步", "昵称", "改名", "打卡", "领礼物", "礼物"),
+    "其它": ("其它", "其他", "抽奖", "骰子", "随机", "管理", "机器状态", "同步", "昵称", "改名"),
 }
 
 
@@ -126,7 +125,7 @@ def _remember(qq: str, question: str, answer: str) -> None:
     _CHAT_LAST[qq] = time.time()
 
 
-async def _dispatch_query(event: GroupMessageEvent, question: str) -> str | None:
+async def _dispatch_query(event: GroupMessageEvent, question: str, bot=None) -> str | None:
     """自然语言查数据路由：意图分类 → 调对应 build 函数。
 
     命中数据查询返回结果文本；非查询意图或任何异常返回 None（由调用方降级纯问答）。
@@ -140,7 +139,7 @@ async def _dispatch_query(event: GroupMessageEvent, question: str) -> str | None
 
     try:
         if kind == "today":
-            return await build_today(qq, nickname)
+            return await build_today(qq, nickname, bot, getattr(event, "group_id", None))
         if kind == "weekly":
             return await build_period(qq, nickname, "周", "data")
         if kind == "monthly":
@@ -184,7 +183,7 @@ async def handle_at(bot: Bot, event: MessageEvent):
     qq = event.get_user_id()
 
     # 1) 自然语言查数据：命中查询意图直接给结果（如「我今天跑了多少」「这周排行」）
-    text = await _dispatch_query(event, question)
+    text = await _dispatch_query(event, question, bot)
     if text:
         await at_me.finish(text)
 

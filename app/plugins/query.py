@@ -13,6 +13,7 @@ from ..models.member import Member
 from ..services import checkin, llm, sync, timeutil
 from ..services.cheers import format_pace
 from ..services.providers.base import DailyStats
+from .admin import notify_gift_claim
 
 query_cmd = on_command("今日", aliases={"步数", "今日运动", "运动"}, priority=5, block=True)
 
@@ -91,31 +92,43 @@ def _checkin_badge(qq: str) -> str:
         s.close()
 
 
-async def _milestone_cheers(qq: str, nickname: str) -> str:
-    """若本次查询正好跨过打卡里程碑，返回 AI 祝贺彩蛋；否则空串。
+async def _milestone_cheers(qq: str, nickname: str, bot=None, gid=None) -> str:
+    """若本次查询正好跨过打卡里程碑，返回祝贺彩蛋；否则空串。
 
-    幂等由 CheckinState 保证——截图路径已触发过的里程碑此处不再重复（返回空）。
+    同时在第 GIFT_DAYS 天自动领取礼物（先到先得）并通知团长。
+    幂等由 CheckinState 保证——截图路径已触发过的里程碑/礼物此处不再重复（返回空）。
     """
     s = get_session()
     ms: list[int] = []
+    gift_rank: int | None = None
     try:
-        ms = checkin.crossed_milestones(qq, checkin.total_days(qq, s), s)
-        if ms:
+        total = checkin.total_days(qq, s)
+        ms = checkin.crossed_milestones(qq, total, s)
+        gift_rank = checkin.auto_gift(qq, total, s)
+        if ms or gift_rank is not None:
             s.commit()
     except Exception as e:
         logger.exception(f"打卡里程碑检测失败: {e}")
     finally:
         s.close()
-    if not ms:
-        return ""
-    parts = []
+
+    parts: list[str] = []
+    if gift_rank is not None:
+        parts.append(
+            f"🎁 恭喜 {nickname}！你是第 {gift_rank} 位达成第 {checkin.GIFT_DAYS} 天打卡的跑友，"
+            "自动领取「小红书惊喜小礼物」，已通知团长安排发货～"
+        )
+        if bot is not None:
+            await notify_gift_claim(bot, qq, nickname, gift_rank, gid)
     for m in ms:
         cheer = await asyncio.to_thread(llm.milestone_cheer, nickname, m)
         parts.append(cheer or f"🎉 达成第 {m} 次打卡里程碑，坚持就是胜利！")
+    if not parts:
+        return ""
     return "\n\n" + "\n".join(parts)
 
 
-async def build_today(qq: str, nickname: str) -> str:
+async def build_today(qq: str, nickname: str, bot=None, gid=None) -> str:
     """构建「今日」查询结果文本（命令 handler 与自然语言路由共用，不直接 finish）。
 
     已绑定平台走接口同步；未绑定读当日截图记录 + 累计里程。
@@ -132,7 +145,7 @@ async def build_today(qq: str, nickname: str) -> str:
             stats = await asyncio.to_thread(sync.sync_daily, member.qq, member.platform, today)
             text = f"{nickname} 今日运动数据：\n{_format_stats(stats)}"
             text += f"\n\n{_checkin_badge(qq)}"
-            text += await _milestone_cheers(qq, nickname)
+            text += await _milestone_cheers(qq, nickname, bot, gid)
             return text
 
         # 未绑定 → 读截图记录（当日明细 + 累计里程）
@@ -166,7 +179,7 @@ async def handle_query(bot: Bot, event: MessageEvent):
     qq = event.get_user_id()
     name = getattr(event.sender, "nickname", None) or qq
     try:
-        text = await build_today(qq, name)
+        text = await build_today(qq, name, bot, getattr(event, "group_id", None))
         await query_cmd.finish(text)
     except (FinishedException, ActionFailed):
         # finish() 正常终止 / 发送超时（NapCat 偶发）会抛此异常，不属于查询失败，直接放行
