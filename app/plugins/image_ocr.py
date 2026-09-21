@@ -276,7 +276,7 @@ async def handle_image(bot: Bot, event: MessageEvent):
         checkin_total = checkin.total_days(qq, session)
         milestone_hits = checkin.crossed_milestones(qq, checkin_total, session)
         gift_rank = checkin.auto_gift(qq, checkin_total, session)
-        fest = checkin.match_festival(today_d, data.get("distance_km", 0.0))
+        fest = checkin.check_festival(qq, today_d, data.get("distance_km", 0.0), session)
         festival_km = data.get("distance_km", 0.0)
         lt = checkin.check_lottery(session)
         if lt is not None:

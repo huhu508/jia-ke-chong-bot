@@ -26,7 +26,7 @@ MILESTONES = [10, 66, 88, 99, 100, 200, 300, 365]
 
 # —— 第 N 天礼物（先到先得）——
 GIFT_DAYS = 100
-GIFT_QUOTA = 3  # 全群先到先得名额
+GIFT_QUOTA = 10  # 全群先到先得名额（满足条件先后顺序，满额后不再触发）
 
 # —— 群抽奖：全群累计打卡天数突破这些值时触发一次（每次抽 LOTTERY_WINNERS 名）——
 LOTTERY_THRESHOLDS = [200, 400]
@@ -138,11 +138,25 @@ def draw_lottery(session: Session) -> list[str]:
 
 
 def match_festival(d: date, distance_km: float) -> dict | None:
-    """日期命中节日且打卡距离≈对应特殊距离时返回节日 dict，否则 None。"""
+    """日期命中节日且打卡距离≈对应特殊距离时返回节日 dict，否则 None（纯判定，无副作用）。"""
     for f in FESTIVALS:
         if (d.month, d.day) == f["date"] and abs((distance_km or 0.0) - f["distance_km"]) <= FESTIVAL_DIST_TOL:
             return f
     return None
+
+
+def check_festival(qq: str, d: date, distance_km: float, session: Session) -> dict | None:
+    """节日 + 特殊距离彩蛋（幂等）：日期命中且距离≈特殊距离时触发。
+
+    与里程碑/礼物/抽奖一致走 CheckinState，每个成员每年每个节日只触发一次；
+    同名节日次年（不同年份）会再次触发。调用方随自己的 session 一起 commit。
+    """
+    fest = match_festival(d, distance_km)
+    if fest is None:
+        return None
+    if not _mark_state(f"festival:{fest['name']}:{d.year}:{qq}", session):
+        return None
+    return fest
 
 
 def gift_claims(session: Session) -> int:
