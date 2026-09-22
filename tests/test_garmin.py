@@ -82,3 +82,19 @@ def test_apply_activity_metrics_filters_non_running():
     assert stats.active_minutes == 30
     assert stats.calories == 400
     assert stats.activities_count == 1
+
+
+def test_apply_activity_metrics_counts_hiking_not_walking():
+    # 徒步 hiking 计入；步行 walking 不计入（避免混入日常散步步数）
+    stats = _stats()
+    acts = [
+        _activity("running", distance=5000, duration=1800, calories=400),
+        _activity("hiking", distance=8000, duration=5400, calories=500),
+        _activity("walking", distance=6000, duration=3600, calories=300),
+    ]
+    GarminProvider._apply_activity_metrics(stats, acts)
+
+    assert stats.distance_km == 13.0  # 5 + 8，walking 的 6 不计入
+    assert stats.active_minutes == 120  # 30 + 90
+    assert stats.calories == 900  # 400 + 500
+    assert stats.activities_count == 2

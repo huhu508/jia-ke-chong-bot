@@ -392,19 +392,22 @@ class CorosProvider(SportProvider):
             break
         return stats
 
-    # 跑步类运动类型编码（COROS 官方 SPORT_NAMES 映射）：100=跑步 102=越野跑 103=场地跑
-    _RUNNING_SPORT_TYPES = {100, 102, 103}
+    # 跑动类运动类型编码（COROS 官方 SPORT_NAMES 映射）：
+    #   100=跑步  101=室内跑/跑步机  102=越野跑  103=场地跑  104=徒步
+    # 游泳（302）/骑行（200）等一律不计入。
+    _RUNNING_SPORT_TYPES = {100, 101, 102, 103, 104}
 
     @staticmethod
     def _parse_sport_records(text: str) -> dict:
-        """从运动记录文本提取聚合指标（只统计跑步）。
+        """从运动记录文本提取聚合指标（只统计跑动类）。
 
         真实格式（每条记录三行，记录间以空行分隔）：
             Duration: 40:17 | Distance: 8.00 km
             Average Pace: 5:02 /km | Avg HR: 160 bpm | Calories: 598 kcal
             LabelId: 4803... | SportType: 100
-        按「LabelId | SportType」行收尾每条记录，只统计跑步（100/102/103），
-        游泳/骑行/徒步等一律跳过。返回 dict：total_distance_km / count /
+        按「LabelId | SportType」行收尾每条记录，只统计跑动类
+        （100=跑步/101=跑步机/102=越野跑/103=场地跑/104=徒步），
+        游泳/骑行等一律跳过。返回 dict：total_distance_km / count /
         max_distance_km / avg_pace_sec_per_km / avg_hr / activities[(label_id, sport_type)]。
         """
         empty = {
@@ -418,8 +421,8 @@ class CorosProvider(SportProvider):
         if not text:
             return empty
 
-        recs = []        # 跑步记录 {dur, km, hr, pace}
-        activities = []  # 跑步记录的 (label_id, sport_type)
+        recs = []        # 跑动类记录 {dur, km, hr, pace}
+        activities = []  # 跑动类记录的 (label_id, sport_type)
         cur: dict = {}   # 当前记录累积字段
 
         def flush() -> None:
@@ -485,7 +488,7 @@ class CorosProvider(SportProvider):
 
         return {
             "total_distance_km": total_km,
-            "count": len(recs),  # 只计跑步条数，游泳/骑行不计入「运动次数」
+            "count": len(recs),  # 只计跑动类条数，游泳/骑行不计入「运动次数」
             "max_distance_km": round(max((r["km"] for r in recs), default=0.0), 2),
             "avg_pace_sec_per_km": avg_pace,
             "avg_hr": avg_hr,

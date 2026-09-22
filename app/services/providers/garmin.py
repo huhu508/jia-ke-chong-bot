@@ -16,11 +16,13 @@ class GarminProvider(SportProvider):
 
     name = "garmin"
 
-    # 跑步类活动的 typeKey 白名单；游泳/骑行/力量等一律不统计（群里反馈游泳数据混入跑步）
+    # 跑动类活动的 typeKey 白名单；游泳/骑行/力量等一律不统计（群里反馈游泳数据混入跑步）。
+    # 跑步/越野跑/场地跑/跑步机/室内跑/虚拟跑/徒步；walking（步行/散步）刻意不计入，避免混入日常步数。
     _RUNNING_TYPE_KEYS = {
         "running", "run", "trail_running", "trail_run",
         "track_running", "track_run", "treadmill_running", "treadmill_run",
         "indoor_running", "indoor_run", "virtual_run",
+        "hiking",
     }
 
     def __init__(self, is_cn: bool = True):
@@ -92,9 +94,9 @@ class GarminProvider(SportProvider):
 
     @staticmethod
     def _is_running_activity(a) -> bool:
-        """判断一条 Garmin 活动是否为跑步（按 activityType.typeKey 白名单）。
+        """判断一条 Garmin 活动是否为跑动类（按 activityType.typeKey 白名单）。
 
-        typeKey 缺失（罕见）时按「无法确认是跑步」跳过，宁可少算也不把游泳/骑行混入。
+        typeKey 缺失（罕见）时按「无法确认是跑动」跳过，宁可少算也不把游泳/骑行混入。
         """
         at = a.get("activityType") if isinstance(a, dict) else None
         if not isinstance(at, dict):
@@ -130,7 +132,7 @@ class GarminProvider(SportProvider):
             if not isinstance(a, dict):
                 continue
             if not GarminProvider._is_running_activity(a):
-                continue  # 只统计跑步，游泳/骑行/力量等一律跳过
+                continue  # 只统计跑动类，游泳/骑行/力量等一律跳过
             running_count += 1
             try:
                 dist_m = float(a.get("distance") or 0)
@@ -155,7 +157,7 @@ class GarminProvider(SportProvider):
             except (TypeError, ValueError):
                 continue
 
-        # 当日运动次数只计跑步（与下方各指标口径一致），供「周数据/月数据」的「运动次数」字段
+        # 当日运动次数只计跑动类（与下方各指标口径一致），供「周数据/月数据」的「运动次数」字段
         stats.activities_count = running_count
         stats.distance_km = round(total_dist_km, 2)
         stats.active_minutes = int(total_duration_s // 60)

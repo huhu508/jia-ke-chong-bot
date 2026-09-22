@@ -46,6 +46,24 @@ def test_parse_sport_records_trail_and_track_counted():
     assert r["activities"] == [("1", 102), ("2", 103)]
 
 
+def test_parse_sport_records_treadmill_and_hiking_counted():
+    # 跑步机 101 / 徒步 104 也算跑动类
+    text = (
+        "(2 records)\n"
+        "Duration: 30:00 | Distance: 5.00 km\n"
+        "Average Pace: 6:00 /km | Avg HR: 140 bpm\n"
+        "LabelId: 1 | SportType: 101\n"  # 跑步机
+        "\n"
+        "Duration: 1:00:00 | Distance: 6.00 km\n"
+        "Average Pace: 10:00 /km | Avg HR: 120 bpm\n"
+        "LabelId: 2 | SportType: 104\n"  # 徒步
+    )
+    r = CorosProvider._parse_sport_records(text)
+    assert r["total_distance_km"] == 11.0
+    assert r["count"] == 2
+    assert r["activities"] == [("1", 101), ("2", 104)]
+
+
 def test_parse_sport_records_empty():
     assert CorosProvider._parse_sport_records("") == {
         "total_distance_km": 0.0,
