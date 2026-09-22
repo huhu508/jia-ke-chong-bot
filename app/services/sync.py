@@ -43,7 +43,10 @@ def _write_record(
     rec.avg_hr = stats.avg_hr
     rec.max_activity_distance_km = stats.max_activity_distance_km
     rec.raw_json = json.dumps(stats.raw or {}, ensure_ascii=False)
-    checkin.ensure_day(qq, d, session)
+    # 只有「有运动数据」才记打卡日（口径同 summary.py:63：距离/时长/消耗任一项>0），
+    # 避免绑定成员当天没运动、仅同步到全天步数/卡路里也被误记为打卡。
+    if stats.distance_km > 0 or stats.active_minutes > 0 or stats.calories > 0:
+        checkin.ensure_day(qq, d, session)
     session.commit()
     return stats
 

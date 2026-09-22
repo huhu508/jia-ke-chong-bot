@@ -21,7 +21,7 @@ class Settings(BaseSettings):
     allowed_groups: list[int] = [595366460, 1062117913]
 
     # 打卡计数起点（本学期开学日，YYYY-MM-DD）：此日期之前的记录不统计打卡天数。
-    semester_start: str = "2026-09-22"
+    semester_start: str = "2026-09-20"
 
     # Garmin 佳明（每用户凭据绑定，此处仅区域开关；中国区账号 is_cn=true）
     garmin_is_cn: bool = True
