@@ -5,15 +5,21 @@ RapidOCR 官方评测中 PP-OCRv5 中文精确匹配率反而更低（0.7355 vs 
 故保持默认模型，不做无收益的模型替换；真正的优化在「按坐标关联标签与数值」。
 """
 
+import threading
+
 _engine = None
+_engine_lock = threading.Lock()
 
 
 def _get_engine():
     global _engine
     if _engine is None:
-        from rapidocr_onnxruntime import RapidOCR
+        # 双检锁：并发首图时避免多个线程同时初始化模型（RapidOCR 初始化较慢且非线程安全）
+        with _engine_lock:
+            if _engine is None:
+                from rapidocr_onnxruntime import RapidOCR
 
-        _engine = RapidOCR()
+                _engine = RapidOCR()
     return _engine
 
 

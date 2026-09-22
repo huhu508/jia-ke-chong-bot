@@ -1,6 +1,7 @@
 """帮助与菜单：/帮助 查看命令（两级菜单）、@机器人 回复菜单 / 运动问答。"""
 
 import asyncio
+import re
 import time
 
 from nonebot import on_command, on_message
@@ -108,28 +109,39 @@ _CHAT_TTL = 600.0  # 10 分钟无交互即清空上下文
 _MAX_TURNS = 6  # 最多保留 6 条（3 轮问答）
 
 
-def _chat_history(qq: str) -> list[dict]:
+def _chat_history(qq: str, group_id) -> list[dict]:
+    key = (group_id, qq)
     now = time.time()
-    if now - _CHAT_LAST.get(qq, 0.0) > _CHAT_TTL:
-        _CHAT_HISTORY.pop(qq, None)
+    if now - _CHAT_LAST.get(key, 0.0) > _CHAT_TTL:
+        _CHAT_HISTORY.pop(key, None)
         return []
-    return list(_CHAT_HISTORY.get(qq, []))
+    return list(_CHAT_HISTORY.get(key, []))
 
 
-def _remember(qq: str, question: str, answer: str) -> None:
-    hist = _CHAT_HISTORY.setdefault(qq, [])
+def _remember(qq: str, group_id, question: str, answer: str) -> None:
+    key = (group_id, qq)
+    hist = _CHAT_HISTORY.setdefault(key, [])
     hist.append({"role": "user", "content": question})
     hist.append({"role": "assistant", "content": answer})
     if len(hist) > _MAX_TURNS:
         del hist[: len(hist) - _MAX_TURNS]
-    _CHAT_LAST[qq] = time.time()
+    _CHAT_LAST[key] = time.time()
+
+
+# 自然语言查数据的强信号词：命中才走 LLM 意图分类，纯闲聊/问答直接跳过，省一次调用延迟。
+_QUERY_HINTS = re.compile(
+    r"今日|今天|步数|距离|排行|周榜|月榜|榜|总结|鼓励|建议|诊断|历史|数据|配速|消耗|爬升|心率|睡眠|跑了|跑量|运动了|公里"
+)
 
 
 async def _dispatch_query(event: GroupMessageEvent, question: str, bot=None) -> str | None:
-    """自然语言查数据路由：意图分类 → 调对应 build 函数。
+    """自然语言查数据路由：关键词预筛 → 意图分类 → 调对应 build 函数。
 
     命中数据查询返回结果文本；非查询意图或任何异常返回 None（由调用方降级纯问答）。
     """
+    # 预筛：明显不是查数据（如「膝盖疼怎么办」）直接跳过分类，避免白等一次 LLM
+    if not _QUERY_HINTS.search(question):
+        return None
     intent = await asyncio.to_thread(llm.classify_intent, question)
     if not intent:
         return None
@@ -151,7 +163,8 @@ async def _dispatch_query(event: GroupMessageEvent, question: str, bot=None) -> 
             period = "月" if intent.get("period") == "month" else "周"
             return await build_period(qq, nickname, period, "advise")
         if kind == "encourage":
-            return await build_period(qq, nickname, "周", "encourage")
+            period = "月" if intent.get("period") == "month" else "周"
+            return await build_period(qq, nickname, period, "encourage")
         if kind == "ranking":
             scope = intent.get("scope") or "day"
             if scope not in ("day", "week", "month"):
@@ -161,6 +174,8 @@ async def _dispatch_query(event: GroupMessageEvent, question: str, bot=None) -> 
             return await build_range(qq, nickname, intent.get("range", ""), False)
         if kind == "history":
             return await build_range(qq, nickname, intent.get("range", ""), True)
+        if kind == "help":
+            return HELP_OVERVIEW
     except Exception as e:
         logger.warning(f"自然语言查询路由失败（降级问答）: {e}")
         return None
@@ -187,10 +202,11 @@ async def handle_at(bot: Bot, event: MessageEvent):
     if text:
         await at_me.finish(text)
 
-    # 2) 多轮问答：带短期上下文（最近几轮），回答后记住本轮
-    history = _chat_history(qq)
+    # 2) 多轮问答：带短期上下文（最近几轮），回答后记住本轮（按群隔离，避免串群）
+    gid = getattr(event, "group_id", None)
+    history = _chat_history(qq, gid)
     text = await asyncio.to_thread(llm.answer_question, question, history)
     if text:
-        _remember(qq, question, text)
+        _remember(qq, gid, question, text)
         await at_me.finish(text)
-    await at_me.finish("这个问题我暂时答不上来（AI 未接入或出错），发「帮助」看我能做什么吧")
+    await at_me.finish("这个问题我暂时答不上来，发「帮助」看我能做什么吧")

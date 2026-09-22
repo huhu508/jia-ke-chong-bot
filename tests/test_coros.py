@@ -21,6 +21,7 @@ def test_parse_sport_records_filters_running_only():
     r = CorosProvider._parse_sport_records(text)
 
     assert r["total_distance_km"] == 8.0  # 只算跑步 8km
+    assert r["total_calories"] == 598  # 只算跑步 598 kcal（游泳/骑行不计）
     assert r["count"] == 1
     assert r["max_distance_km"] == 8.0
     assert r["avg_pace_sec_per_km"] == 300.0  # 40:00 / 8km
@@ -67,6 +68,7 @@ def test_parse_sport_records_treadmill_and_hiking_counted():
 def test_parse_sport_records_empty():
     assert CorosProvider._parse_sport_records("") == {
         "total_distance_km": 0.0,
+        "total_calories": 0,
         "count": 0,
         "max_distance_km": 0.0,
         "avg_pace_sec_per_km": 0.0,

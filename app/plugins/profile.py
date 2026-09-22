@@ -1,5 +1,7 @@
 """个人设置：/昵称 设置自定义显示昵称、/删除打卡 撤销最近一次截图打卡。"""
 
+import re
+
 from nonebot import on_command
 from nonebot.adapters.onebot.v11 import Bot, Message, MessageEvent
 from nonebot.exception import ActionFailed, FinishedException
@@ -13,6 +15,10 @@ from ..services.member import get_or_create_member
 
 nickname_cmd = on_command("昵称", aliases={"设置昵称", "改名"}, priority=5, block=True)
 undo_cmd = on_command("删除打卡", aliases={"撤销打卡", "删除记录"}, priority=5, block=True)
+
+# 昵称会被拼进 LLM 的 prompt，过滤掉可注入的控制字符/结构符号（换行、引号、反引号、
+# 各种括号、冒号分号、反斜杠等），只保留可正常显示的昵称字符。
+_NICK_UNSAFE = re.compile(r"[\x00-\x1f\x7f\"'`{}\[\]<>:;\\]")
 
 
 @nickname_cmd.handle()
@@ -32,6 +38,10 @@ async def handle_nickname(bot: Bot, event: MessageEvent, args: Message = Command
             member.custom_nickname = ""
             session.commit()
             await nickname_cmd.finish("已清空自定义昵称，恢复显示 QQ 昵称")
+        # 过滤可注入 LLM prompt 的危险字符后再校验长度，避免「超长含换行」绕过
+        text = _NICK_UNSAFE.sub("", text).strip()
+        if not text:
+            await nickname_cmd.finish("昵称里没有可用字符，请用中文 / 字母 / 数字 / 常见标点")
         if len(text) > 32:
             await nickname_cmd.finish("昵称太长了，最多 32 个字")
         member.custom_nickname = text

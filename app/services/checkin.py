@@ -53,6 +53,15 @@ def counting_start() -> date:
         return timeutil.today()
 
 
+def is_active_day(distance_km, active_minutes, calories) -> bool:
+    """「有运动数据」的统一口径：距离 / 时长 / 消耗任一项 >0。
+
+    供 sync._write_record / summary / ranking / diagnose 统一复用，避免各处口径漂移
+    （历史上曾出现缺 calories 判定导致漏记）。calories 一律为「运动消耗」，不含基础代谢。
+    """
+    return (distance_km or 0) > 0 or (active_minutes or 0) > 0 or (calories or 0) > 0
+
+
 def ensure_day(qq: str, d: date, session: Session) -> bool:
     """记录一个打卡日（幂等）。d 早于计数起点时不记录。返回是否新增。
 

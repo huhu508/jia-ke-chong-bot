@@ -15,7 +15,7 @@ from nonebot import on_message
 from nonebot.adapters.onebot.v11 import Bot, MessageEvent
 from nonebot.log import logger
 from nonebot.rule import Rule
-from PIL import Image
+from PIL import Image, ImageOps
 
 from ..db import get_session
 from ..models.member import Member
@@ -38,7 +38,11 @@ IMG_DIR = Path("data/images")
 
 
 async def _download(bot: Bot, seg) -> bytes:
-    """下载图片字节。优先 get_image API，其次直接下载 url。"""
+    """下载图片字节。优先 get_image API，其次直接下载 url。
+
+    注意：这里 httpx 用 verify=False——QQ/NapCat 图片 url 常是内网地址或自签证书，
+    关闭 TLS 校验只影响「读图」这一件事，不涉及任何凭据，风险可接受。
+    """
     file = seg.data.get("file", "")
     url = seg.data.get("url", "")
     try:
@@ -67,6 +71,8 @@ async def _download(bot: Bot, seg) -> bytes:
 
 # 表情包/缩略图的最长边阈值：QQ 表情包通常 ≤ 400px，手机运动截图 ≥ 1280px
 _MIN_IMAGE_EDGE = 500
+# 图片大小上限（20MB）：超大文件直接跳过，防 OCR/视觉模型吃内存
+_MAX_IMAGE_BYTES = 20 * 1024 * 1024
 
 
 def _is_too_small(img_bytes: bytes) -> bool:
@@ -76,7 +82,8 @@ def _is_too_small(img_bytes: bytes) -> bool:
     """
     try:
         with Image.open(BytesIO(img_bytes)) as im:
-            w, h = im.size
+            # 应用 EXIF 转置：部分相机/机型会横拍，不转置会误判长短边
+            w, h = ImageOps.exif_transpose(im).size
         return max(w, h) < _MIN_IMAGE_EDGE
     except Exception as e:
         logger.warning(f"读取图片尺寸失败: {e}")
@@ -118,20 +125,52 @@ def _format_cheer(data: dict) -> str:
 # ---------------------------------------------------------------------------
 
 _RECENT_IMAGES: dict[str, float] = {}  # md5 -> 记录时间戳
+_RECENT_DHASH: dict[str, float] = {}   # 感知哈希 -> 记录时间戳（转发二次压缩仍能判重）
 _DUP_WINDOW_SEC = 86400  # 24 小时
 
 
-def _is_duplicate(md5: str) -> bool:
-    """同一张图在窗口期内重发（含群内转发）视为重复；顺带惰性清理过期项。"""
+def _purge(table: dict[str, float]) -> None:
     now = time.time()
-    stale = [k for k, ts in _RECENT_IMAGES.items() if now - ts > _DUP_WINDOW_SEC]
-    for k in stale:
-        _RECENT_IMAGES.pop(k, None)
-    return md5 in _RECENT_IMAGES
+    for k in [k for k, ts in table.items() if now - ts > _DUP_WINDOW_SEC]:
+        table.pop(k, None)
 
 
-def _mark_seen(md5: str) -> None:
-    _RECENT_IMAGES[md5] = time.time()
+def _dhash(img_bytes: bytes, size: int = 9) -> str:
+    """感知哈希（dHash）：灰度缩放到 (size+1)×size，逐行比较相邻像素得 64 位指纹。
+
+    与 MD5（字节级）互补：转发/重传造成的二次压缩会改字节但视觉不变，dHash 仍能判重。
+    计算失败返回空串（退化到只按 MD5 判重）。
+    """
+    try:
+        with Image.open(BytesIO(img_bytes)) as im:
+            im = ImageOps.exif_transpose(im).convert("L").resize((size + 1, size), Image.Resampling.LANCZOS)
+            px = list(im.getdata())
+    except Exception as e:
+        logger.warning(f"dHash 计算失败: {e}")
+        return ""
+    bits = 0
+    width = size + 1
+    for y in range(size):
+        row = y * width
+        for x in range(size):
+            bits = (bits << 1) | (1 if px[row + x + 1] > px[row + x] else 0)
+    return format(bits, "x")
+
+
+def _is_duplicate(md5: str, dhash: str = "") -> bool:
+    """同一张图在窗口期内重发（含群内转发）视为重复；顺带惰性清理过期项。"""
+    _purge(_RECENT_IMAGES)
+    _purge(_RECENT_DHASH)
+    if md5 in _RECENT_IMAGES:
+        return True
+    return bool(dhash) and dhash in _RECENT_DHASH
+
+
+def _mark_seen(md5: str, dhash: str = "") -> None:
+    now = time.time()
+    _RECENT_IMAGES[md5] = now
+    if dhash:
+        _RECENT_DHASH[dhash] = now
 
 
 @image_matcher.handle()
@@ -147,13 +186,19 @@ async def handle_image(bot: Bot, event: MessageEvent):
         logger.warning(f"[图片识别] qq={qq} 图片下载失败，静默跳过")
         return
 
+    # 大小上限：超大文件直接跳过，防 OCR/视觉模型吃内存
+    if len(img_bytes) > _MAX_IMAGE_BYTES:
+        logger.warning(f"[图片识别] qq={qq} 图片过大（{len(img_bytes)} bytes），跳过")
+        return
+
     # 表情包/缩略图：尺寸过小，直接跳过（不 OCR、不落盘、不响应）
     if _is_too_small(img_bytes):
         logger.info(f"[图片识别] qq={qq} 疑似表情包/小图，跳过")
         return
 
-    # 图片指纹：用于全局去重（见 _is_duplicate）
+    # 图片指纹：用于全局去重（见 _is_duplicate）；md5 字节级 + dHash 感知级
     img_md5 = hashlib.md5(img_bytes).hexdigest()
+    img_dhash = _dhash(img_bytes)
 
     # 保存原始图片，便于排查 OCR 识别误差
     try:
@@ -175,12 +220,15 @@ async def handle_image(bot: Bot, event: MessageEvent):
         data = parsers.parse_activity_from_boxes(result)
         if not data:
             data = parsers.parse_activity(text)
-        # 多模态兜底：本地 OCR 一个字段都没认出来时，用视觉模型再看一次；
-        # 失败返回 None → 保持空 dict，照常走后续「未识别出数据，静默跳过」
-        if not data:
-            data = await asyncio.to_thread(llm.vision_extract, img_bytes) or {}
-            if data:
-                logger.info(f"[图片识别] qq={qq} 本地 OCR 未命中，视觉兜底结果: {data}")
+        # 多模态兜底：本地 OCR 没认全关键字段（尤其距离）时，用视觉模型再看一次；
+        # 只补缺失字段、不覆盖本地已识别出的字段（本地坐标关联通常比视觉更准）。
+        if not data.get("distance_km"):
+            vision = await asyncio.to_thread(llm.vision_extract, img_bytes) or {}
+            if vision:
+                for k, v in vision.items():
+                    if k not in data:
+                        data[k] = v
+                logger.info(f"[图片识别] qq={qq} 本地缺 distance_km，视觉兜底补充: {vision}")
     except Exception as e:
         logger.warning(f"[图片识别] qq={qq} 解析失败: {e}")
         return
@@ -245,7 +293,7 @@ async def handle_image(bot: Bot, event: MessageEvent):
         await image_matcher.finish(_format_cheer(data))
 
     # 重复打卡去重：同一张图（含群内转发）已记过，全部字段不重复累计
-    if _is_duplicate(img_md5):
+    if _is_duplicate(img_md5, img_dhash):
         await image_matcher.finish(
             _format_cheer(data) + "\n\n⏳ 这张截图刚才已经记过啦，本次不重复累计"
         )
@@ -269,8 +317,15 @@ async def handle_image(bot: Bot, event: MessageEvent):
             **{k: v for k, v in data.items() if k in DailyStats.model_fields},
         )
         sync.record_manual_activity(member, today_d, stats, session)
-        sync.log_checkin(qq, today_d, data["distance_km"], session)
-        _mark_seen(img_md5)
+        sync.log_checkin(
+            qq,
+            today_d,
+            data["distance_km"],
+            session,
+            ascent_meters=data.get("ascent_meters", 0.0),
+            calories=data.get("calories", 0),
+            active_minutes=data.get("active_minutes", 0),
+        )
 
         # 打卡彩蛋：里程碑 / 礼物 / 节日+特殊距离 / 群抽奖（幂等，状态表保证只触发一次）
         checkin_total = checkin.total_days(qq, session)
@@ -286,9 +341,11 @@ async def handle_image(bot: Bot, event: MessageEvent):
                 winner_names.append(m.display_name if m else w)
             lottery_result = (lt, winner_names)
         session.commit()
+        # 全部落库成功后才标记去重：commit 失败不会漏标，重发仍能补记
+        _mark_seen(img_md5, img_dhash)
     except Exception as e:
         logger.exception(f"[图片识别] qq={qq} 记录失败: {e}")
-        await image_matcher.finish(f"记录失败，请稍后重试：{e}")
+        await image_matcher.finish("记录失败，请稍后重试，或发「帮助」看我能做什么")
     finally:
         session.close()
 

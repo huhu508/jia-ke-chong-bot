@@ -268,6 +268,7 @@ class CorosProvider(SportProvider):
             pass
 
         stats.distance_km = parsed["total_distance_km"]
+        stats.calories = parsed["total_calories"]
         stats.activities_count = parsed["count"]
         stats.max_activity_distance_km = parsed["max_distance_km"]
         stats.avg_pace_sec_per_km = parsed["avg_pace_sec_per_km"]
@@ -380,9 +381,8 @@ class CorosProvider(SportProvider):
             m = re.search(r"Steps:\s*([\d,]+)", body)
             if m:
                 stats.steps = int(m.group(1).replace(",", ""))
-            m = re.search(r"Calories:\s*([\d,]+)", body)
-            if m:
-                stats.calories = int(m.group(1).replace(",", ""))
+            # Calories 不再取全天总消耗（含基础代谢，恒 >0，会误判「有运动」），
+            # 改为由 _parse_sport_records 累加每条运动的运动消耗（与 Garmin 口径对齐）。
             m = re.search(r"Exercise:\s*(?:(\d+)\s*h\s*)?(\d+)\s*min", body)
             if m:
                 stats.active_minutes = int(m.group(1) or 0) * 60 + int(m.group(2))
@@ -407,11 +407,12 @@ class CorosProvider(SportProvider):
             LabelId: 4803... | SportType: 100
         按「LabelId | SportType」行收尾每条记录，只统计跑动类
         （100=跑步/101=跑步机/102=越野跑/103=场地跑/104=徒步），
-        游泳/骑行等一律跳过。返回 dict：total_distance_km / count /
+        游泳/骑行等一律跳过。返回 dict：total_distance_km / total_calories / count /
         max_distance_km / avg_pace_sec_per_km / avg_hr / activities[(label_id, sport_type)]。
         """
         empty = {
             "total_distance_km": 0.0,
+            "total_calories": 0,
             "count": 0,
             "max_distance_km": 0.0,
             "avg_pace_sec_per_km": 0.0,
@@ -434,6 +435,7 @@ class CorosProvider(SportProvider):
                         "km": cur["km"],
                         "hr": cur.get("hr", 0),
                         "pace": cur.get("pace", 0.0),
+                        "cal": cur.get("cal", 0),
                     }
                 )
                 activities.append((cur.get("label_id", ""), cur["sport_type"]))
@@ -469,6 +471,11 @@ class CorosProvider(SportProvider):
             if m:
                 cur["hr"] = int(m.group(1))
 
+            # Calories：单次运动消耗（kcal），与 Avg HR 常在同一行，故独立 search
+            m = re.search(r"Calories:\s*(\d+)\s*kcal", line)
+            if m:
+                cur["cal"] = int(m.group(1))
+
             # LabelId + SportType：一条记录的结尾标记，收尾上一条
             m = re.search(r"LabelId:\s*(\d+)\s*\|\s*SportType:\s*(\d+)", line)
             if m:
@@ -488,6 +495,7 @@ class CorosProvider(SportProvider):
 
         return {
             "total_distance_km": total_km,
+            "total_calories": sum(r["cal"] for r in recs),
             "count": len(recs),  # 只计跑动类条数，游泳/骑行不计入「运动次数」
             "max_distance_km": round(max((r["km"] for r in recs), default=0.0), 2),
             "avg_pace_sec_per_km": avg_pace,

@@ -137,7 +137,14 @@ _FIELD_SPECS = [
     {
         "key": "distance_km",
         "labels": ["距离", "总公里", "里程", "公里数", "总里程", "distance"],
-        "units": ["km", "公里", "千米"],
+        # 合并框/单位框匹配的单位（不含 m/米，避免把「150米」爬升误当距离）；
+        # 值框换算见 factors（含 m/mi），如「1500 m」→1.5 km、「5 mi」→8.05 km。
+        "units": ["km", "公里", "千米", "mi", "英里"],
+        "factors": {
+            "km": 1.0, "公里": 1.0, "千米": 1.0,
+            "mi": 1.609, "英里": 1.609,
+            "m": 0.001, "米": 0.001,
+        },
         "kind": "decimal",
         "convert": lambda v: float(v.replace(",", "")),
     },
@@ -211,7 +218,7 @@ _FIELD_SPECS = [
     },
     {
         "key": "avg_pace_sec_per_km",
-        "labels": ["配速", "平均配速", "pace", "average pace", "avg pace"],
+        "labels": ["平均配速", "配速", "pace", "average pace", "avg pace"],
         "units": ["/km", "min/km"],
         "kind": "pace",
         "convert": lambda v: int(v),
@@ -227,6 +234,14 @@ _FIELD_SPECS = [
 
 # 数值提取时排除含这些字符的框（时间「40:16」、配速「5'02"」、温度「24°℃」、湿度「48%」）。
 _NUMBER_EXCLUDE = re.compile(r"[:'\"°℃%]")
+
+# 短标签子串陷阱：如 avg_hr 的「心率」、avg_pace 的「配速」这类短兜底标签，
+# 会误匹配「最大心率」「最佳配速」「静息心率」等非均值字段的框。
+# 框文本命中这些修饰词时跳过该框（这些修饰词只会出现在 max/rest 等非目标字段）。
+_QUALIFIER_WORDS = (
+    "最大", "最高", "最低", "最佳", "最快", "最慢",
+    "峰值", "静息", "静止", "区间", "目标", "剩余",
+)
 
 
 def _extract_number(text: str, allow_decimal: bool = True):
@@ -280,7 +295,42 @@ def _make_extractor(spec):
         return _extract_duration
     if kind == "pace":
         return _extract_pace
-    return lambda t: _extract_number(t, allow_decimal=(kind == "decimal"))
+    return _make_scaled_extractor(spec)
+
+
+def _make_scaled_extractor(spec):
+    """decimal/int 字段提取器：提数字，识别单位并按 spec.factors 换算（返回字符串供 convert 归一）。
+
+    仅当 factors 里命中非 1.0 的单位时才换算（如距离「1500 m」→1.5）；未命中/无 factors
+    时原样返回数字串，行为与旧 _extract_number 一致。
+    """
+    kind = spec["kind"]
+    factors = spec.get("factors", {})
+
+    def _extract(text: str):
+        t = text.strip()
+        if _NUMBER_EXCLUDE.search(t):
+            return None
+        pat = r"\d[\d,]*(?:\.\d+)?" if kind == "decimal" else r"\d[\d,]*"
+        m = re.search(pat, t)
+        if not m:
+            return None
+        raw = m.group(0)
+        factor = 1.0
+        for unit, f in sorted(factors.items(), key=lambda kv: -len(kv[0])):
+            if re.search(
+                r"\d[\d,]*(?:\.\d+)?\s*" + re.escape(unit) + r"(?![A-Za-z一-鿿])",
+                t,
+                re.IGNORECASE,
+            ):
+                factor = f
+                break
+        if factor == 1.0:
+            return raw
+        val = float(raw.replace(",", "")) * factor
+        return f"{val:g}" if kind == "decimal" else str(int(round(val)))
+
+    return _extract
 
 
 def _iter_items(result) -> list:
@@ -309,6 +359,7 @@ def _value_near(items, anchor, extractor):
       - 上方（COROS/Sigma：大数字在上、标签在下）
       - 下方（苹果健身：标签在上、值在下）
       - 左侧同行（单位在值右，如「15.02 km」分框）
+      - 右侧同行（标签在左、值在右，如「距离 5.2」分框）
     多个候选取离 anchor 最近的。
     """
     best = None
@@ -322,7 +373,8 @@ def _value_near(items, anchor, extractor):
         dx = it["cx"] - anchor["cx"]
         dy = it["cy"] - anchor["cy"]
         ok = (
-            (abs(dy) <= 40 and -350 <= dx <= -10)  # 左侧同行
+            (abs(dy) <= 40 and -350 <= dx <= -10)  # 左侧同行（单位在值右）
+            or (abs(dy) <= 40 and 10 <= dx <= 350)  # 右侧同行（标签在左、值在右）
             or (-240 <= dy <= -15 and abs(dx) <= 350)  # 上方（含左上斜角：大字在单位左上，水平可偏 200+）
             or (15 <= dy <= 90 and abs(dx) <= 350)  # 下方
         )
@@ -361,10 +413,15 @@ def _extract_field(items, spec):
     # 1) 标签定位（labels 顺序即优先级，更具体的标签排前面）
     for kw in labels:
         for it in items:
-            if kw in it["text"].lower():
-                v = _value_near(items, it, extractor)
-                if v is not None:
-                    return v
+            t = it["text"].strip().lower()
+            if kw not in t:
+                continue
+            # 短标签子串陷阱：避免「心率」误匹配「最大心率」等带修饰词的框
+            if any(q in t for q in _QUALIFIER_WORDS):
+                continue
+            v = _value_near(items, it, extractor)
+            if v is not None:
+                return v
 
     # 2) 单位框定位（「km」「kcal」「min」等独立单位框）
     for it in items:
@@ -487,7 +544,7 @@ def sanitize_activity(data: dict) -> tuple[dict, str | None]:
 
     距离是核心指标：
       - 超出单次运动合理范围上限（如把月汇总总量 / 步数当成距离）→ 整体拒绝；
-      - 距离与时长推出的速度超出人类跑步极限 → 整体拒绝；
+      - 距离与时长推出的速度超出人类跑步极限 → 温和丢弃时长、保留距离（时长更易 OCR 误读）；
       - 距离过小 / 为零 → 仅丢弃该字段（可能是纯步数/心率截图），其余字段照常。
     其余字段超范围仅丢弃该字段，不拖累整张截图。
     """
@@ -509,14 +566,13 @@ def sanitize_activity(data: dict) -> tuple[dict, str | None]:
             cleaned.pop("distance_km", None)
             dist = None
 
-    # 交叉校验：距离与时长同时存在时，速度不能超过人类跑步极限
+    # 交叉校验：距离与时长同时存在时，速度不能超过人类跑步极限。
+    # 距离是核心指标且已通过范围校验，超限更可能是时长 OCR 误读（如「1:30」被读成 1 分钟），
+    # 故温和丢弃时长、保留距离，而非整体拒绝（否则合法「5.2km / 1h30m」会被整图拒收）。
     if reject is None and dist is not None and cleaned.get("active_minutes"):
         speed_kmh = dist / (cleaned["active_minutes"] / 60.0)
         if speed_kmh > _MAX_SPEED_KMH:
-            reject = (
-                f"距离 {dist:g} km 与时长 {cleaned['active_minutes']} 分钟推出的速度"
-                f" {speed_kmh:.1f} km/h 超出跑步极限，疑似距离或时长识别错误"
-            )
+            cleaned.pop("active_minutes", None)
 
     # 其余字段超范围仅丢弃
     for key, (lo, hi) in _VALID_RANGES.items():

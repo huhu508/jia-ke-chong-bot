@@ -37,6 +37,9 @@ class Settings(BaseSettings):
     llm_model: str = "agnes-3.0-flash"
     # 大模型接口地址（OpenAI 兼容 chat/completions 全路径）
     llm_base_url: str = "https://apihub.agnes-ai.com/v1/chat/completions"
+    # 识图隐私开关（默认开启）：本地 OCR 未识别出距离时，允许把截图发给视觉模型兜底识别；
+    # 关闭后只用本地 OCR（RapidOCR，数据不出本机），截图绝不上传云端。
+    llm_vision_enabled: bool = True
 
 
 settings = Settings()

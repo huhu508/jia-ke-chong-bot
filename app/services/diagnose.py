@@ -25,6 +25,7 @@ from sqlalchemy.orm import Session
 from ..models.daily_record import DailyRecord
 from .cheers import format_pace
 from . import timeutil
+from .checkin import is_active_day
 
 # 诊断需要的最少周数（配速趋势、慢性负荷都依赖它）
 _WEEKS = 4
@@ -201,7 +202,7 @@ def compute_diagnosis(session: Session, qq: str, race: tuple[float, int] | None 
         dist = round(sum(r.distance_km or 0.0 for r in in_bucket), 2)
         paces = [r.avg_pace_sec_per_km for r in in_bucket if r.avg_pace_sec_per_km]
         active_days = sum(
-            1 for r in in_bucket if (r.distance_km or 0) > 0 or (r.active_minutes or 0) > 0
+            1 for r in in_bucket if is_active_day(r.distance_km, r.active_minutes, r.calories)
         )
         buckets.append(
             {

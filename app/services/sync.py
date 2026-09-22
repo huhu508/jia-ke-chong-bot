@@ -3,9 +3,11 @@ from datetime import date, timedelta
 
 from nonebot.log import logger
 from sqlalchemy import delete, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from ..db import get_session
+from ..models.checkin_day import CheckinDay
 from ..models.checkin_log import CheckinLog
 from ..models.daily_record import DailyRecord
 from ..models.manual_distance import ManualDistance
@@ -29,6 +31,22 @@ def _write_record(
     if rec is None:
         rec = DailyRecord(member_qq=qq, record_date=d, platform=platform)
         session.add(rec)
+        try:
+            # 提前 flush 触发 uq_daily_member_date_platform，捕获并发 upsert 竞态
+            #（后台回填历史 + 用户查询同时落库时，两个线程可能同时 select 到 None）。
+            session.flush()
+        except IntegrityError:
+            # 别人已抢先插入：回滚本次 pending，重查已有行后覆盖
+            session.rollback()
+            rec = session.execute(
+                select(DailyRecord).where(
+                    DailyRecord.member_qq == qq,
+                    DailyRecord.record_date == d,
+                    DailyRecord.platform == platform,
+                )
+            ).scalar_one_or_none()
+            if rec is None:
+                raise
 
     rec.steps = stats.steps
     rec.distance_km = stats.distance_km
@@ -43,9 +61,9 @@ def _write_record(
     rec.avg_hr = stats.avg_hr
     rec.max_activity_distance_km = stats.max_activity_distance_km
     rec.raw_json = json.dumps(stats.raw or {}, ensure_ascii=False)
-    # 只有「有运动数据」才记打卡日（口径同 summary.py:63：距离/时长/消耗任一项>0），
+    # 只有「有运动数据」才记打卡日（统一口径 is_active_day：距离/时长/消耗任一项>0），
     # 避免绑定成员当天没运动、仅同步到全天步数/卡路里也被误记为打卡。
-    if stats.distance_km > 0 or stats.active_minutes > 0 or stats.calories > 0:
+    if checkin.is_active_day(stats.distance_km, stats.active_minutes, stats.calories):
         checkin.ensure_day(qq, d, session)
     session.commit()
     return stats
@@ -109,19 +127,39 @@ def record_manual_activity(
     return rec
 
 
-def log_checkin(qq: str, d: date, distance_km: float, session: Session) -> None:
+def log_checkin(
+    qq: str,
+    d: date,
+    distance_km: float,
+    session: Session,
+    *,
+    ascent_meters: float = 0.0,
+    calories: int = 0,
+    active_minutes: int = 0,
+) -> None:
     """记录一次截图打卡的明细（供「删除最近一次打卡」精确回退）。"""
-    session.add(CheckinLog(member_qq=qq, record_date=d, distance_km=distance_km))
+    session.add(
+        CheckinLog(
+            member_qq=qq,
+            record_date=d,
+            distance_km=distance_km,
+            ascent_meters=ascent_meters,
+            calories=calories,
+            active_minutes=active_minutes,
+        )
+    )
     session.commit()
 
 
 def undo_last_checkin(qq: str, session: Session) -> tuple[float, date | None]:
     """撤销某成员最近一次截图打卡，返回 (回退距离, 打卡日期)；无记录返回 (0.0, None)。
 
-    回退三处，保证累计里程与当日明细一致：
+    完整回退四处，保证累计里程 / 当日明细 / 打卡天数一致：
       1. manual_distance：total / 本周累计各扣回该次距离（跨周时本周值可能已重置，只扣本周一的）；
-      2. daily_record(platform="manual")：当日明细距离扣回、次数减一，归零则删行；
-      3. checkin_log：删除这条明细。
+      2. daily_record(platform="manual")：扣回距离/爬升/消耗/时长、次数减一，
+         并重建 max_activity_distance_km（= 该日剩余截图的单次最长），无数据则删行；
+      3. checkin_log：删除这条明细；
+      4. checkin_day：该日若已无任何运动数据（含其它平台），删除打卡日，累计天数随之减少。
     SQLite 单条删除极快，可直接在事件循环内同步执行。
     """
     last = session.execute(
@@ -131,6 +169,9 @@ def undo_last_checkin(qq: str, session: Session) -> tuple[float, date | None]:
         return 0.0, None
 
     dist = last.distance_km or 0.0
+    ascent = last.ascent_meters or 0.0
+    cal = last.calories or 0
+    mins = last.active_minutes or 0
     d = last.record_date
 
     md = session.get(ManualDistance, qq)
@@ -139,6 +180,9 @@ def undo_last_checkin(qq: str, session: Session) -> tuple[float, date | None]:
         that_monday = d - timedelta(days=d.weekday())
         if md.week_start == that_monday:
             md.week_distance_km = round(max(0.0, (md.week_distance_km or 0.0) - dist), 2)
+
+    # 先删这条明细，后续重建 max 时只统计该日剩余截图
+    session.delete(last)
 
     rec = session.execute(
         select(DailyRecord).where(
@@ -149,13 +193,37 @@ def undo_last_checkin(qq: str, session: Session) -> tuple[float, date | None]:
     ).scalar_one_or_none()
     if rec is not None:
         rec.activities_count = max(0, (rec.activities_count or 0) - 1)
-        new_dist = round((rec.distance_km or 0.0) - dist, 2)
-        if new_dist <= 0 and (rec.activities_count or 0) <= 0:
+        rec.distance_km = round(max(0.0, (rec.distance_km or 0.0) - dist), 2)
+        rec.ascent_meters = round(max(0.0, (rec.ascent_meters or 0.0) - ascent), 2)
+        rec.calories = max(0, (rec.calories or 0) - cal)
+        rec.active_minutes = max(0, (rec.active_minutes or 0) - mins)
+        remaining_km = session.execute(
+            select(CheckinLog.distance_km).where(
+                CheckinLog.member_qq == qq, CheckinLog.record_date == d
+            )
+        ).scalars().all()
+        rec.max_activity_distance_km = round(max(remaining_km, default=0.0), 2)
+        if (rec.activities_count or 0) <= 0 and not checkin.is_active_day(
+            rec.distance_km, rec.active_minutes, rec.calories
+        ):
             session.delete(rec)
-        else:
-            rec.distance_km = max(0.0, new_dist)
 
-    session.delete(last)
+    # 落库上述 delete，让下方查询只看到真实剩余的当日明细
+    session.flush()
+
+    # 该日若已无任何运动数据（含其它平台），删除打卡日
+    others = session.execute(
+        select(DailyRecord).where(
+            DailyRecord.member_qq == qq, DailyRecord.record_date == d
+        )
+    ).scalars().all()
+    if not any(
+        checkin.is_active_day(r.distance_km, r.active_minutes, r.calories) for r in others
+    ):
+        session.execute(
+            delete(CheckinDay).where(CheckinDay.member_qq == qq, CheckinDay.record_date == d)
+        )
+
     session.commit()
     return dist, d
 

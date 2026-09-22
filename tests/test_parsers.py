@@ -51,10 +51,20 @@ def test_sanitize_reject_absurd_distance():
     assert reject is not None
 
 
-def test_sanitize_reject_impossible_speed():
-    # 100 km 但 30 分钟 → 200 km/h，超出跑步极限 → 拒绝
+def test_sanitize_drop_impossible_speed_duration():
+    # 距离在单次合理范围内但速度超限（时长 OCR 误读，如「1:30」读成 1 分钟）→ 温和丢弃时长、保留距离
+    cleaned, reject = sanitize_activity({"distance_km": 5.2, "active_minutes": 1})
+    assert reject is None
+    assert "active_minutes" not in cleaned
+    assert cleaned["distance_km"] == 5.2
+
+
+def test_sanitize_keeps_long_run_drops_duration():
+    # 100 km 百公里越野 + 30 分钟（200 km/h 不可能）→ 保留距离（合法越野）、丢弃误读的时长
     cleaned, reject = sanitize_activity({"distance_km": 100.0, "active_minutes": 30})
-    assert reject is not None
+    assert reject is None
+    assert "active_minutes" not in cleaned
+    assert cleaned["distance_km"] == 100.0
 
 
 def test_sanitize_drop_tiny_distance():
@@ -100,3 +110,42 @@ def test_parse_boxes_distance_diagonal_unit():
     assert data["calories"] == 264
     assert data["active_minutes"] == 24
     assert data["ascent_meters"] == 150.0
+
+
+def test_parse_boxes_distance_m_to_km():
+    # 「距离」标签 + 右侧「1500 m」值框 → 单位换算 m→km，且走右侧同行候选区
+    result = [
+        (_box(100.0, 200.0), "距离", 0.99),
+        (_box(240.0, 200.0), "1500 m", 0.99),
+    ]
+    data = parse_activity_from_boxes(result)
+    assert data["distance_km"] == 1.5
+
+
+def test_parse_boxes_distance_mi_to_km():
+    # 合并框「5 mi」→ mi→km 换算
+    result = [
+        (_box(200.0, 200.0), "5 mi", 0.99),
+    ]
+    data = parse_activity_from_boxes(result)
+    assert abs(data["distance_km"] - 8.045) < 1e-9
+
+
+def test_parse_boxes_label_boundary_max_hr():
+    # 「最大心率」框不应被 avg_hr 的「心率」短标签误匹配（否定词过滤）
+    result = [
+        (_box(200.0, 200.0), "最大心率", 0.99),
+        (_box(320.0, 200.0), "180", 0.99),
+    ]
+    data = parse_activity_from_boxes(result)
+    assert "avg_hr" not in data
+
+
+def test_parse_boxes_label_avg_hr_ok():
+    # 「平均心率」标签正常匹配右侧数值
+    result = [
+        (_box(200.0, 200.0), "平均心率", 0.99),
+        (_box(320.0, 200.0), "160", 0.99),
+    ]
+    data = parse_activity_from_boxes(result)
+    assert data["avg_hr"] == 160

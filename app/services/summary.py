@@ -13,6 +13,7 @@ from sqlalchemy.orm import Session
 from ..db import get_session
 from ..models.daily_record import DailyRecord
 from . import timeutil
+from .checkin import is_active_day
 
 
 def compute_member_summary(
@@ -60,7 +61,7 @@ def compute_member_summary(
 
     for r in rows:
         # 距离/时长/消耗任一项 >0 即视为「运动日」
-        if (r.distance_km or 0) > 0 or (r.active_minutes or 0) > 0 or (r.calories or 0) > 0:
+        if is_active_day(r.distance_km, r.active_minutes, r.calories):
             active_days += 1
         activities += r.activities_count or 0
         distance += r.distance_km or 0.0
@@ -186,6 +187,7 @@ def compute_daily_list(
             {
                 "distance_km": 0.0,
                 "active_minutes": 0,
+                "calories": 0,
                 "ascent_meters": 0.0,
                 "activities_count": 0,
                 "pace_wsum": 0.0,
@@ -194,6 +196,7 @@ def compute_daily_list(
         )
         day["distance_km"] += r.distance_km or 0.0
         day["active_minutes"] += r.active_minutes or 0
+        day["calories"] += r.calories or 0
         day["ascent_meters"] += r.ascent_meters or 0.0
         day["activities_count"] += r.activities_count or 0
         dist = r.distance_km or 0.0
@@ -204,7 +207,7 @@ def compute_daily_list(
     result = []
     for d in sorted(by_day):
         day = by_day[d]
-        if day["distance_km"] <= 0 and day["active_minutes"] <= 0:
+        if not is_active_day(day["distance_km"], day["active_minutes"], day["calories"]):
             continue  # 休息日跳过，避免占满列表
         pace = day["pace_wsum"] / day["pace_w"] if day["pace_w"] > 0 else 0.0
         result.append(

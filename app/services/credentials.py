@@ -27,7 +27,10 @@ def load(qq: str, platform: str) -> Optional[dict]:
         raw = json.loads(p.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError):
         return None
-    return crypto.decrypt_json(raw)
+    result = crypto.decrypt_json(raw)
+    # 文件内容可能被写成非对象（数组/字符串等），调用方假设拿到 dict 会 .get() 崩溃，
+    # 这里统一收敛为「无凭据」。
+    return result if isinstance(result, dict) else None
 
 
 def save(qq: str, platform: str, data: dict) -> None:

@@ -18,6 +18,7 @@ from ..db import get_session
 from ..models.daily_record import DailyRecord
 from ..models.manual_distance import ManualDistance
 from ..models.member import Member
+from .checkin import is_active_day
 
 _TOP_N = 10
 _MEDALS = ["🥇", "🥈", "🥉"]
@@ -62,8 +63,8 @@ def compute_range_rankings(
             distance[qq] += rec.distance_km or 0.0
             ascent[qq] += rec.ascent_meters or 0.0
             max_single[qq] = max(max_single[qq], rec.max_activity_distance_km or 0.0)
-            # 运动天数：同一天只要「有数据」就记 1 天（口径同 summary.py），用 set 按日期去重
-            if (rec.distance_km or 0.0) > 0 or (rec.active_minutes or 0) > 0 or (rec.calories or 0) > 0:
+            # 运动天数：同一天只要「有数据」就记 1 天（口径同 is_active_day），用 set 按日期去重
+            if is_active_day(rec.distance_km, rec.active_minutes, rec.calories):
                 active_days[qq].add(rec.record_date)
 
         # 周榜：未绑定成员的距离榜改用「本周累计」（ManualDistance 只存未绑定成员的累加值，

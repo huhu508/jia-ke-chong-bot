@@ -79,16 +79,18 @@ async def build_period(qq: str, nickname: str, kind: str, mode: str) -> str:
     """
     name, period, span, s, bound = await _gather_qq(qq, nickname, kind)
 
-    # 鼓励：无数据也照常鼓励（沿用原行为，不拦）
+    # 与 周数据/月数据/建议 口径一致：无数据先给友好提示，避免把全 0 数据喂给 LLM 编造。
+    # 鼓励也纳入：无数据不喂 LLM，走确定性模板（_template_cheer 已有 km<=0 分支）。
+    if s["active_days"] == 0 and s["distance_km"] <= 0:
+        if mode == "encourage":
+            return _template_cheer(name, s)
+        return _empty_hint(name, period, span, bound)
+
     if mode == "encourage":
         text = await asyncio.to_thread(llm.encourage, name, s)
         if text:
             return f"🤖 {name}，{text}"
         return _template_cheer(name, s)
-
-    # 与 周数据/月数据/建议 口径一致：无数据先给友好提示，避免把全 0 数据喂给 LLM 编造
-    if s["active_days"] == 0 and s["distance_km"] <= 0:
-        return _empty_hint(name, period, span, bound)
 
     if mode == "data":
         return _format_summary(name, period, span, s)

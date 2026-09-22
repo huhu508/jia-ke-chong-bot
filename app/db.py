@@ -48,6 +48,11 @@ _MIGRATIONS = {
         "week_start": "DATE",
         "week_distance_km": "FLOAT DEFAULT 0",
     },
+    "checkin_log": {
+        "ascent_meters": "FLOAT DEFAULT 0",
+        "calories": "INTEGER DEFAULT 0",
+        "active_minutes": "INTEGER DEFAULT 0",
+    },
 }
 
 
