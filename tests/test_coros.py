@@ -75,3 +75,20 @@ def test_parse_sport_records_empty():
         "avg_hr": 0,
         "activities": [],
     }
+
+
+def test_parse_activity_ascent_outdoor_gain_loss():
+    # 户外跑：Elevation Gain / Loss 格式，取 Gain 侧
+    text = "Workout Time: 40:00\nDistance: 8.00 km\nElevation Gain / Loss: 6 m / 0 m"
+    assert CorosProvider._parse_activity_ascent(text) == 6.0
+
+
+def test_parse_activity_ascent_treadmill_total_ascent():
+    # 跑步机/室内跑：Total Ascent 格式（坡度估算爬升）
+    text = "Indoor Run Activity Details\nDistance: 15.00 km\nTotal Ascent: 972 m\nCalories: 839 kcal"
+    assert CorosProvider._parse_activity_ascent(text) == 972.0
+
+
+def test_parse_activity_ascent_empty():
+    assert CorosProvider._parse_activity_ascent("") == 0.0
+    assert CorosProvider._parse_activity_ascent("Distance: 5.00 km\nCalories: 200 kcal") == 0.0

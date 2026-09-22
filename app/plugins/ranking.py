@@ -3,6 +3,7 @@ from datetime import timedelta
 
 from nonebot import on_command
 from nonebot.adapters.onebot.v11 import Bot, MessageEvent
+from nonebot.exception import ActionFailed, FinishedException
 from nonebot.log import logger
 
 from ..services import ranking, sync, timeutil
@@ -41,6 +42,8 @@ async def handle_ranking(bot: Bot, event: MessageEvent):
     try:
         text = await build_ranking("day")
         await ranking_cmd.finish(text)
+    except (FinishedException, ActionFailed):
+        raise
     except Exception as e:
         logger.exception(f"排行查询失败: {e}")
         await ranking_cmd.finish(f"排行查询失败：{e}")
@@ -51,6 +54,8 @@ async def handle_weekly(bot: Bot, event: MessageEvent):
     try:
         text = await build_ranking("week")
         await weekly_cmd.finish(text)
+    except (FinishedException, ActionFailed):
+        raise
     except Exception as e:
         logger.exception(f"周榜查询失败: {e}")
         await weekly_cmd.finish(f"周榜查询失败：{e}")
@@ -61,6 +66,8 @@ async def handle_monthly(bot: Bot, event: MessageEvent):
     try:
         text = await build_ranking("month")
         await monthly_cmd.finish(text)
+    except (FinishedException, ActionFailed):
+        raise
     except Exception as e:
         logger.exception(f"月榜查询失败: {e}")
         await monthly_cmd.finish(f"月榜查询失败：{e}")

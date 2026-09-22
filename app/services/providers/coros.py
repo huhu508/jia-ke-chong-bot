@@ -507,11 +507,15 @@ class CorosProvider(SportProvider):
     def _parse_activity_ascent(text: str) -> float:
         """从 getActivityDetail 文本提取累计爬升（米）。
 
-        真实格式：``Elevation Gain / Loss: 0 m / 2 m``（取 Gain 侧）。
+        户外跑格式：``Elevation Gain / Loss: 0 m / 2 m``（取 Gain 侧）；
+        室内跑/跑步机格式：``Total Ascent: 972 m``（坡度估算的爬升，无 Gain/Loss）。
         """
         if not text:
             return 0.0
         m = re.search(r"Elevation Gain\s*/\s*Loss:\s*([\d.]+)\s*m", text)
+        if m:
+            return float(m.group(1))
+        m = re.search(r"Total Ascent:\s*([\d.]+)\s*m", text)
         return float(m.group(1)) if m else 0.0
 
     @staticmethod
