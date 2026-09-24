@@ -23,9 +23,9 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ..models.daily_record import DailyRecord
-from .cheers import format_pace
 from . import timeutil
 from .checkin import is_active_day
+from .cheers import format_pace
 
 # 诊断需要的最少周数（配速趋势、慢性负荷都依赖它）
 _WEEKS = 4

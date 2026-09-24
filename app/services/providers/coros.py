@@ -422,13 +422,16 @@ class CorosProvider(SportProvider):
         if not text:
             return empty
 
-        recs = []        # 跑动类记录 {dur, km, hr, pace}
+        recs = []  # 跑动类记录 {dur, km, hr, pace}
         activities = []  # 跑动类记录的 (label_id, sport_type)
-        cur: dict = {}   # 当前记录累积字段
+        cur: dict = {}  # 当前记录累积字段
 
         def flush() -> None:
             nonlocal cur
-            if cur.get("sport_type") in CorosProvider._RUNNING_SPORT_TYPES and cur.get("km") is not None:
+            if (
+                cur.get("sport_type") in CorosProvider._RUNNING_SPORT_TYPES
+                and cur.get("km") is not None
+            ):
                 recs.append(
                     {
                         "dur": cur.get("dur", 0),

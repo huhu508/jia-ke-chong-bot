@@ -21,7 +21,7 @@
 | 数据存储 | SQLAlchemy 2.0 + SQLite | 单文件、零运维、够用；`Session` 按需创建 |
 | OCR | RapidOCR（rapidocr-onnxruntime） | **本地**识别，截图数据不出本机 |
 | 平台 SDK | garminconnect / COROS 官方 MCP | 佳明仅邮箱登录；COROS 走 OAuth 授权码 + PKCE |
-| 大模型 | 智谱 GLM（OpenAI 兼容） | 国产、免费档 `glm-4-flash`、接口稳定 |
+| 大模型 | Agnes AI（OpenAI 兼容） | 国产、`agnes-3.0-flash`、接口稳定 |
 | 配置 | pydantic-settings | 类型安全读 `.env` |
 | 代码质量 | ruff（format + lint） | 单工具覆盖格式化 / 静态检查 / 导入排序 |
 
@@ -31,15 +31,18 @@
 ┌─────────────────────────────────────────────────────┐
 │ 协议层   NoneBot2 + OneBot v11 适配器（NapCat 反向 WS）│
 ├─────────────────────────────────────────────────────┤
-│ 插件层   app/plugins（8 个：命令处理器 + 消息处理器）  │
-│          admin / group_tracker / image_ocr /         │
-│          interact / lottery / query / ranking /      │
-│          summary                                     │
+│ 插件层   app/plugins（14 个：命令处理器 + 消息处理器） │
+│          admin / activity / checkin / diagnose /     │
+│          gate / group_tracker / history / image_ocr/ │
+│          interact / lottery / profile / query /      │
+│          ranking / summary                           │
 ├─────────────────────────────────────────────────────┤
 │ 服务层   app/services（业务逻辑，与 NoneBot 解耦）     │
-│          sync · ranking · summary · aggregator ·     │
-│          retention · ocr · parsers · cheers · llm ·  │
-│          member · credentials · providers/           │
+│          activity · checkin · cheers · credentials · │
+│          crypto · diagnose · llm · member · ocr ·    │
+│          parsers · permission · ranking · retention ·│
+│          summary · sync · tasks · timeutil ·         │
+│          providers/                                  │
 ├─────────────────────────────────────────────────────┤
 │ 数据层   app/models（SQLAlchemy ORM）+ SQLite         │
 └─────────────────────────────────────────────────────┘
@@ -83,12 +86,15 @@ LLM 被严格限制在**核心数据链路之外**：
 |---|---|---|
 | `Member` | `qq`（PK） | 成员：绑定平台、平台账号、QQ 昵称 |
 | `DailyRecord` | `(member_qq, record_date, platform)` 唯一 | 每日运动明细（供排行 / 汇总） |
-| `WeeklyStat` | `(member_qq, week_start, platform)` 唯一 | 周汇总（幂等写入，历史产物） |
-| `ManualDistance` | `member_qq`（PK） | 截图成员的累计里程 |
+| `ManualDistance` | `member_qq`（PK） | 截图成员的累计里程 + 本周累计 |
 | `Group` | `group_id`（PK） | 机器人出现过的群（播报定位目标） |
+| `CheckinDay` | `(member_qq, record_date)` 唯一 | 打卡日（累计 / 本月打卡天数） |
+| `CheckinLog` | 自增 id | 截图打卡明细（供「删除打卡」精确回退） |
+| `CheckinState` | `key`（PK） | 触发幂等标记（里程碑 / 礼物 / 抽奖 / 节日 / 活动） |
+| `Activity` | 自增 id | 跑团活动（manual 手动 / cancel 取消固定） |
 
-- 原始明细 `daily_record` 保留 **45 天**（`retention.RETENTION_DAYS`），覆盖最长 31 天的月榜 + 缓冲。
-- 周榜 / 月榜**直接由明细聚合**（`compute_range_rankings`），不再依赖 `weekly_stat`。
+- 原始明细 `daily_record` 按 `settings.retention_days` 滚动保留（默认 **365 天**），供个人复盘 / 历史查询。
+- 周榜 / 月榜**直接由明细聚合**（`compute_range_rankings`）。
 
 ## 6. 关键数据流
 
@@ -123,10 +129,11 @@ compute_range_rankings(start, end) → 按距离 / 爬升 / 单次距离聚合�
 
 ### 6.5 调度
 
-两个常驻 asyncio 循环（`scheduler.py`）：
+单个常驻 asyncio 循环（`services/tasks.py` 的 `start_scheduler`）：
 
-- `_weekly_loop`：每周一 00:10 幂等聚合 + 清理 45 天前明细；
-- `_daily_broadcast_loop`：每天 23:00 计算并播报排行。
+- `_daily_broadcast_loop`：每天 23:00（`BROADCAST_HOUR/MINUTE`）执行 `_run_broadcast`，
+  依次做：清理过期明细 → 同步今日数据 → 计算并播报排行 → 群抽奖兜底 →
+  活动前一天提醒 → 月末发下月跑团日历。
 
 ## 7. 安全与隐私约束
 
@@ -145,7 +152,8 @@ compute_range_rankings(start, end) → 按距离 / 爬升 / 单次距离聚合�
 - ✅ 今日 / 周数据 / 月数据 / 总结 / 鼓励我 / 建议 查询。
 - ✅ 训练诊断（`诊断`）：ACWR 负荷 / 恢复信号 / 配速趋势 + 附比赛成绩算 VO₂max / 成绩预测（运动科学确定性公式，非 LLM）。
 - ✅ 今日榜 / 周榜 / 月榜 + 定时播报（周日 / 月末自动追加）。
-- ✅ 智谱 GLM 增强层（总结 / 鼓励 / 建议 / 问答 / 打卡点评，失败降级模板）。
+- ✅ 活动播报（跑团日历）：固定周三例训 / 周五例跑自动进日历 + 手动活动覆盖 / 取消 + 每月末发下月日历图 + 活动前一天 23:00 提醒（管理员隐藏命令）。
+- ✅ Agnes AI 增强层（总结 / 鼓励 / 建议 / 问答 / 打卡点评，失败降级模板）。
 - ✅ 抽奖 / 骰子 / 随机数 互动玩法。
 - ✅ 代码规范化：ruff 格式化 + 静态检查全过，`pyproject.toml` 依赖补全。
 

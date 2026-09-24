@@ -142,5 +142,7 @@ def format_leaderboards(rankings: dict, title: str, with_active_days: bool = Fal
         f"🚀 单次运动距离排行\n{_fmt_rank(rankings.get('max_single', []), 'km', '{:.2f}')}",
     ]
     if with_active_days:
-        parts.append(f"\n\n📅 运动天数排行\n{_fmt_rank(rankings.get('active_days', []), '天', '{:.0f}')}")
+        parts.append(
+            f"\n\n📅 运动天数排行\n{_fmt_rank(rankings.get('active_days', []), '天', '{:.0f}')}"
+        )
     return "".join(parts)

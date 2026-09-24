@@ -141,9 +141,13 @@ _FIELD_SPECS = [
         # 值框换算见 factors（含 m/mi），如「1500 m」→1.5 km、「5 mi」→8.05 km。
         "units": ["km", "公里", "千米", "mi", "英里"],
         "factors": {
-            "km": 1.0, "公里": 1.0, "千米": 1.0,
-            "mi": 1.609, "英里": 1.609,
-            "m": 0.001, "米": 0.001,
+            "km": 1.0,
+            "公里": 1.0,
+            "千米": 1.0,
+            "mi": 1.609,
+            "英里": 1.609,
+            "m": 0.001,
+            "米": 0.001,
         },
         "kind": "decimal",
         "convert": lambda v: float(v.replace(",", "")),
@@ -239,8 +243,18 @@ _NUMBER_EXCLUDE = re.compile(r"[:'\"°℃%]")
 # 会误匹配「最大心率」「最佳配速」「静息心率」等非均值字段的框。
 # 框文本命中这些修饰词时跳过该框（这些修饰词只会出现在 max/rest 等非目标字段）。
 _QUALIFIER_WORDS = (
-    "最大", "最高", "最低", "最佳", "最快", "最慢",
-    "峰值", "静息", "静止", "区间", "目标", "剩余",
+    "最大",
+    "最高",
+    "最低",
+    "最佳",
+    "最快",
+    "最慢",
+    "峰值",
+    "静息",
+    "静止",
+    "区间",
+    "目标",
+    "剩余",
 )
 
 
@@ -375,7 +389,9 @@ def _value_near(items, anchor, extractor):
         ok = (
             (abs(dy) <= 40 and -350 <= dx <= -10)  # 左侧同行（单位在值右）
             or (abs(dy) <= 40 and 10 <= dx <= 350)  # 右侧同行（标签在左、值在右）
-            or (-240 <= dy <= -15 and abs(dx) <= 350)  # 上方（含左上斜角：大字在单位左上，水平可偏 200+）
+            or (
+                -240 <= dy <= -15 and abs(dx) <= 350
+            )  # 上方（含左上斜角：大字在单位左上，水平可偏 200+）
             or (15 <= dy <= 90 and abs(dx) <= 350)  # 下方
         )
         if not ok:
@@ -525,14 +541,14 @@ def detect_page_kind(text: str) -> str:
 # 误识别成某字段，超范围的值视为识别错误。距离是核心指标，超上限整体拒绝；
 # 其余字段各自校验，超范围仅丢弃该字段。
 _VALID_RANGES = {
-    "distance_km": (0.05, 100.0),       # 单次 50 米 ~ 100 公里（百公里越野上限）
+    "distance_km": (0.05, 100.0),  # 单次 50 米 ~ 100 公里（百公里越野上限）
     "avg_pace_sec_per_km": (120, 900),  # 2:00 ~ 15:00 /km
-    "avg_hr": (40, 220),                # bpm
-    "active_minutes": (1, 1440),        # 1 分钟 ~ 24 小时
-    "calories": (0, 20000),             # 千卡（百公里越野可上万）
-    "ascent_meters": (0, 10000),        # 米
-    "steps": (0, 200000),               # 步（百公里约 12 万步）
-    "sleep_hours": (0, 24),             # 小时
+    "avg_hr": (40, 220),  # bpm
+    "active_minutes": (1, 1440),  # 1 分钟 ~ 24 小时
+    "calories": (0, 20000),  # 千卡（百公里越野可上万）
+    "ascent_meters": (0, 10000),  # 米
+    "steps": (0, 200000),  # 步（百公里约 12 万步）
+    "sleep_hours": (0, 24),  # 小时
 }
 
 # 距离 + 时长交叉校验的速度上限（km/h），超过即「距离/时长」至少一个识别错。
@@ -558,9 +574,7 @@ def sanitize_activity(data: dict) -> tuple[dict, str | None]:
     if dist is not None:
         lo, hi = _VALID_RANGES["distance_km"]
         if dist > hi:
-            reject = (
-                f"识别出的距离 {dist:g} km 超出单次运动合理范围上限 {hi:g} km，疑似识别错误"
-            )
+            reject = f"识别出的距离 {dist:g} km 超出单次运动合理范围上限 {hi:g} km，疑似识别错误"
         elif dist < lo:
             # 距离过小/为零：丢弃该字段，其余字段照常（不整体拒绝）
             cleaned.pop("distance_km", None)

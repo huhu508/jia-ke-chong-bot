@@ -19,9 +19,17 @@ class GarminProvider(SportProvider):
     # 跑动类活动的 typeKey 白名单；游泳/骑行/力量等一律不统计（群里反馈游泳数据混入跑步）。
     # 跑步/越野跑/场地跑/跑步机/室内跑/虚拟跑/徒步；walking（步行/散步）刻意不计入，避免混入日常步数。
     _RUNNING_TYPE_KEYS = {
-        "running", "run", "trail_running", "trail_run",
-        "track_running", "track_run", "treadmill_running", "treadmill_run",
-        "indoor_running", "indoor_run", "virtual_run",
+        "running",
+        "run",
+        "trail_running",
+        "trail_run",
+        "track_running",
+        "track_run",
+        "treadmill_running",
+        "treadmill_run",
+        "indoor_running",
+        "indoor_run",
+        "virtual_run",
         "hiking",
     }
 

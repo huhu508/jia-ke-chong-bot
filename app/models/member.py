@@ -7,7 +7,9 @@ from .base import Base
 
 # 无效昵称占位：群临时会话拿不到真实昵称时 NapCat 会返回这些值，不应作为显示名。
 # 统一小写比较；「临时会话」是主要来源（成员通过群临时会话绑定平台时触发）。
-INVALID_NICKNAMES = frozenset({"", "临时会话", "匿名", "匿名用户", "qq用户", "null", "none", "unknown"})
+INVALID_NICKNAMES = frozenset(
+    {"", "临时会话", "匿名", "匿名用户", "qq用户", "null", "none", "unknown"}
+)
 
 
 class Member(Base):

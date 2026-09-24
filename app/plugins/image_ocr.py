@@ -125,7 +125,7 @@ def _format_cheer(data: dict) -> str:
 # ---------------------------------------------------------------------------
 
 _RECENT_IMAGES: dict[str, float] = {}  # md5 -> 记录时间戳
-_RECENT_DHASH: dict[str, float] = {}   # 感知哈希 -> 记录时间戳（转发二次压缩仍能判重）
+_RECENT_DHASH: dict[str, float] = {}  # 感知哈希 -> 记录时间戳（转发二次压缩仍能判重）
 _DUP_WINDOW_SEC = 86400  # 24 小时
 
 
@@ -143,7 +143,11 @@ def _dhash(img_bytes: bytes, size: int = 9) -> str:
     """
     try:
         with Image.open(BytesIO(img_bytes)) as im:
-            im = ImageOps.exif_transpose(im).convert("L").resize((size + 1, size), Image.Resampling.LANCZOS)
+            im = (
+                ImageOps.exif_transpose(im)
+                .convert("L")
+                .resize((size + 1, size), Image.Resampling.LANCZOS)
+            )
             px = list(im.getdata())
     except Exception as e:
         logger.warning(f"dHash 计算失败: {e}")

@@ -15,9 +15,7 @@ class CheckinDay(Base):
     """
 
     __tablename__ = "checkin_day"
-    __table_args__ = (
-        UniqueConstraint("member_qq", "record_date", name="uq_checkin_member_date"),
-    )
+    __table_args__ = (UniqueConstraint("member_qq", "record_date", name="uq_checkin_member_date"),)
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
     member_qq: Mapped[str] = mapped_column(String(32), index=True)

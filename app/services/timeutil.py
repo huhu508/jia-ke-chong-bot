@@ -5,6 +5,7 @@ NUC 部署机系统时区是 UTC，若直接 `date.today()` / `datetime.now()`�
 业务里所有「今天 / 当前时刻」一律从这里取，保证任何部署环境都按北京时间算。
 中国无夏令时，固定 UTC+8 即可，无需 tzdata。
 """
+
 from datetime import date, datetime, timedelta, timezone
 
 CHINA_TZ = timezone(timedelta(hours=8), name="Asia/Shanghai")

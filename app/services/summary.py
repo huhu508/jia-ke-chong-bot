@@ -16,9 +16,7 @@ from . import timeutil
 from .checkin import is_active_day
 
 
-def compute_member_summary(
-    qq: str, start: date, end: date, session: Session | None = None
-) -> dict:
+def compute_member_summary(qq: str, start: date, end: date, session: Session | None = None) -> dict:
     """聚合 [start, end) 区间某成员的全部 daily_record（任一平台/截图）。
 
     默认内部自开 session（阻塞 DB 调用），供 asyncio.to_thread 直接执行；测试可

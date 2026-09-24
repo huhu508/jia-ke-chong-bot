@@ -19,6 +19,7 @@ from ..models.manual_distance import ManualDistance
 from ..models.member import Member
 from ..services import checkin, credentials, sync, timeutil
 from ..services.member import get_or_create_member, normalize_nickname
+from ..services.permission import is_superuser
 from ..services.providers import VALID_PLATFORMS, get_provider
 
 bind_cmd = on_command("绑定", priority=5, block=True)
@@ -42,11 +43,6 @@ BACKFILL_DAYS = 31
 # 私聊发送（群临时会话 / 好友私聊）：每通道重试次数、重试间隔（秒）
 _PRIVATE_RETRIES = 3
 _PRIVATE_RETRY_DELAY = 1.0
-
-
-def _is_superuser(event: MessageEvent) -> bool:
-    superusers = get_driver().config.superusers
-    return event.get_user_id() in superusers
 
 
 async def _backfill_async(qqs: list[str] | None = None) -> None:
@@ -81,9 +77,7 @@ async def _backfill_async(qqs: list[str] | None = None) -> None:
             logger.warning(f"回填 {qq} 失败: {e}")
 
 
-async def _send_private_robust(
-    bot: Bot, user_id: int, group_id: int | None, message: str
-) -> bool:
+async def _send_private_robust(bot: Bot, user_id: int, group_id: int | None, message: str) -> bool:
     """把消息送到对方私聊：优先群临时会话（带 group_id，无需加好友），失败退回好友私聊。
 
     群临时会话与好友私聊对绑定而言效果一致——消息都落到同一个 QQ 的私聊会话，收件 QQ 号
@@ -325,8 +319,8 @@ async def handle_status(bot: Bot, event: MessageEvent):
         session.close()
 
     lines = [
-        f"佳明 Garmin：{counts['garmin']} 人 · 发「绑定 garmin」按私聊提示绑定",
-        f"高驰 COROS：{counts['coros']} 人 · 发「绑定 coros」私密授权",
+        f"{_PLATFORM_LABELS['garmin']}：{counts['garmin']} 人 · 发「绑定 garmin」按私聊提示绑定",
+        f"{_PLATFORM_LABELS['coros']}：{counts['coros']} 人 · 发「绑定 coros」私密授权",
         f"其他平台：{n_manual} 人靠截图记录 · 📷 发运动截图自动记录",
     ]
     await status_cmd.finish("📊 机器状态\n" + "━━━━━━━━━━━━\n" + "\n".join(lines))
@@ -334,7 +328,7 @@ async def handle_status(bot: Bot, event: MessageEvent):
 
 @sync_all_cmd.handle()
 async def handle_sync_all(bot: Bot, event: MessageEvent):
-    if not _is_superuser(event):
+    if not is_superuser(event):
         await sync_all_cmd.finish("仅管理员可执行")
     session = get_session()
     try:
@@ -354,7 +348,7 @@ async def handle_sync_all(bot: Bot, event: MessageEvent):
 
 @refresh_names_cmd.handle()
 async def handle_refresh_names(bot: Bot, event: MessageEvent):
-    if not _is_superuser(event):
+    if not is_superuser(event):
         await refresh_names_cmd.finish("仅管理员可执行")
 
     # 目标群：优先白名单，否则机器人出现过的群

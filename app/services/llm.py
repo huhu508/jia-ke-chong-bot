@@ -85,9 +85,26 @@ def _strip_markdown(text: str) -> str:
 # 底层模型/供应商名泄露兜底词表（小写匹配）。正常运动对话几乎不会出现这些词，
 # 一旦出现即视为身份泄露，替换为统一话术。
 _IDENTITY_LEAK = (
-    "agnes", "sapiens", "openai", "chatgpt", "claude", "anthropic", "gemini",
-    "deepseek", "glm", "chatglm", "智谱", "qwen", "通义", "文心", "ernie",
-    "豆包", "doubao", "kimi", "minimax", "gpt",
+    "agnes",
+    "sapiens",
+    "openai",
+    "chatgpt",
+    "claude",
+    "anthropic",
+    "gemini",
+    "deepseek",
+    "glm",
+    "chatglm",
+    "智谱",
+    "qwen",
+    "通义",
+    "文心",
+    "ernie",
+    "豆包",
+    "doubao",
+    "kimi",
+    "minimax",
+    "gpt",
 )
 
 
@@ -171,7 +188,9 @@ def _call(
             logger.warning("大模型鉴权失败（401，key 无效或过期），将降级")
             return None
         if resp.status_code >= 500:
-            logger.warning(f"大模型服务端错误（{resp.status_code}，第 {attempt + 1}/{retries + 1} 次）")
+            logger.warning(
+                f"大模型服务端错误（{resp.status_code}，第 {attempt + 1}/{retries + 1} 次）"
+            )
             if attempt < retries:
                 time.sleep(0.5 * (attempt + 1))
                 continue
@@ -318,7 +337,10 @@ def milestone_cheer(name: str, days: int) -> str | None:
     return _chat(
         [
             {"role": "system", "content": system_prompt},
-            {"role": "user", "content": f"{name} 今天达成了第 {days} 次运动打卡里程碑，请祝贺并鼓励一句。"},
+            {
+                "role": "user",
+                "content": f"{name} 今天达成了第 {days} 次运动打卡里程碑，请祝贺并鼓励一句。",
+            },
         ],
         max_tokens=200,
         timeout=20.0,
@@ -334,7 +356,10 @@ def festival_cheer(name: str, festival: str, distance_km: float) -> str | None:
     return _chat(
         [
             {"role": "system", "content": system_prompt},
-            {"role": "user", "content": f"{name} 在{festival}这天打卡 {distance_km} km，请庆祝并鼓励。"},
+            {
+                "role": "user",
+                "content": f"{name} 在{festival}这天打卡 {distance_km} km，请庆祝并鼓励。",
+            },
         ],
         max_tokens=200,
         timeout=20.0,
@@ -391,7 +416,7 @@ def classify_intent(text: str) -> dict | None:
         '  "help"       —— 查帮助/能做什么/使用说明\n'
         '  "chat"       —— 运动知识问答或闲聊（默认）\n'
         "附加字段（不需要时省略）：period 取 week/month；scope 取 day/week/month（ranking 用）；"
-        'range 存时间段原文（data_range/history 用，如「9月」「近30天」）。\n'
+        "range 存时间段原文（data_range/history 用，如「9月」「近30天」）。\n"
         '示例：{"intent": "today"}\n'
         '示例：{"intent": "ranking", "scope": "week"}\n'
         '示例：{"intent": "summary", "period": "month"}\n'
@@ -438,10 +463,13 @@ def vision_extract(img_bytes: bytes) -> dict | None:
     content = _call(
         [
             {"role": "system", "content": system_prompt},
-            {"role": "user", "content": [
-                {"type": "text", "text": "提取这张截图里的运动数据，只输出 JSON。"},
-                {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}},
-            ]},
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "提取这张截图里的运动数据，只输出 JSON。"},
+                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}},
+                ],
+            },
         ],
         max_tokens=300,
         temperature=0.1,
