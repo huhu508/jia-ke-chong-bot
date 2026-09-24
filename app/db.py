@@ -53,6 +53,9 @@ _MIGRATIONS = {
         "calories": "INTEGER DEFAULT 0",
         "active_minutes": "INTEGER DEFAULT 0",
     },
+    "activity": {
+        "kind": "VARCHAR(16) DEFAULT 'manual'",
+    },
 }
 
 

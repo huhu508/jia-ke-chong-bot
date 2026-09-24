@@ -48,7 +48,7 @@ def _format_stats(s: DailyStats) -> str:
     return "\n".join(lines)
 
 
-def _format_manual(name: str, d: date, rec, total_km: float) -> str:
+def _format_manual(name: str, d: date, rec, total_km: float, week_km: float = 0.0) -> str:
     """未绑定成员：把当日截图记录（platform="manual"）+ 累计里程格式化。
 
     rec 为 None 表示今日暂无新截图，只展示累计里程并引导发截图。
@@ -73,6 +73,8 @@ def _format_manual(name: str, d: date, rec, total_km: float) -> str:
             lines.append(f"🏆 单次最长：{rec.max_activity_distance_km} km")
         if rec.activities_count:
             lines.append(f"🏷️ 今日已记录 {rec.activities_count} 次运动")
+    if week_km:
+        lines.append(f"🗓 本周累计：{week_km} km")
     if total_km:
         lines.append(f"📈 累计里程：{total_km} km")
 
@@ -157,6 +159,7 @@ async def build_today(qq: str, nickname: str, bot=None, gid=None) -> str:
             )
         ).scalar_one_or_none()
         total = sync.get_manual_distance(qq, session)
+        week = sync.get_week_distance(qq, session)
 
         if rec is None and total <= 0:
             return (
@@ -166,7 +169,7 @@ async def build_today(qq: str, nickname: str, bot=None, gid=None) -> str:
                 "绑定后发「今日」即可查询当日数据"
             )
 
-        text = _format_manual(nickname, today, rec, total)
+        text = _format_manual(nickname, today, rec, total, week)
         text += f"\n\n{_checkin_badge(qq)}"
         text += await _milestone_cheers(qq, nickname)
         return text

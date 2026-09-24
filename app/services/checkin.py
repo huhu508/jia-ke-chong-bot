@@ -70,9 +70,7 @@ def ensure_day(qq: str, d: date, session: Session) -> bool:
     if d < counting_start():
         return False
     exists = session.execute(
-        select(CheckinDay.id).where(
-            CheckinDay.member_qq == qq, CheckinDay.record_date == d
-        )
+        select(CheckinDay.id).where(CheckinDay.member_qq == qq, CheckinDay.record_date == d)
     ).scalar_one_or_none()
     if exists is not None:
         return False
@@ -102,6 +100,18 @@ def month_days(qq: str, start: date, end: date, session: Session) -> int:
         )
         or 0
     )
+
+
+def next_milestone(total: int) -> int | None:
+    """返回下一个未达成的里程碑值（全部达成返回 None）。
+
+    供「打卡」命令展示「距下一个里程碑还差 X 天」，把被动彩蛋变成主动目标——
+    里程碑彩蛋是「达成后被动触发」，这里补「达成前主动引导」，二者互补。
+    """
+    for m in MILESTONES:
+        if total < m:
+            return m
+    return None
 
 
 def global_total(session: Session) -> int:
@@ -177,7 +187,9 @@ def draw_lottery(session: Session) -> list[str]:
 def match_festival(d: date, distance_km: float) -> dict | None:
     """日期命中节日且打卡距离≈对应特殊距离时返回节日 dict，否则 None（纯判定，无副作用）。"""
     for f in FESTIVALS:
-        if (d.month, d.day) == f["date"] and abs((distance_km or 0.0) - f["distance_km"]) <= FESTIVAL_DIST_TOL:
+        if (d.month, d.day) == f["date"] and abs(
+            (distance_km or 0.0) - f["distance_km"]
+        ) <= FESTIVAL_DIST_TOL:
             return f
     return None
 

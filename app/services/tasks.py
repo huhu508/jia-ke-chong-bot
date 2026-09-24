@@ -8,27 +8,15 @@
 import asyncio
 import datetime
 
-from nonebot import get_bots, get_driver
-from nonebot.adapters.onebot.v11 import Bot
+from nonebot import get_driver
 from nonebot.log import logger
-from sqlalchemy import select
 
 from ..config import settings
 from ..db import get_session
-from ..models.group import Group
 from ..models.member import Member
-from . import checkin, ranking, retention, sync, timeutil
+from . import activity, checkin, ranking, retention, sync, timeutil
 
 driver = get_driver()
-
-
-def _discover_groups() -> list[int]:
-    """返回已记录的群号列表（机器人出现过的群）。阻塞 DB 调用，放线程执行。"""
-    session = get_session()
-    try:
-        return [int(g.group_id) for g in session.execute(select(Group)).scalars().all()]
-    finally:
-        session.close()
 
 
 def _lottery_if_due() -> tuple[int, list[str]] | None:
@@ -90,37 +78,14 @@ async def _run_broadcast() -> None:
     if not messages:
         return
 
-    # 按 self_id 去重，避免 NapCat 重复反向 WS 连接导致同一 bot 播报两遍
-    bots: list[Bot] = []
-    seen_ids: set[str] = set()
-    for b in get_bots().values():
-        if isinstance(b, Bot) and b.self_id not in seen_ids:
-            seen_ids.add(b.self_id)
-            bots.append(b)
+    # 解析播报目标：bots 按 self_id 去重、群按白名单过滤（见 activity.resolve_targets）
+    bots, groups = await activity.resolve_targets()
     if not bots:
         logger.warning("没有已连接的 OneBot Bot，跳过排行播报")
         return
-
-    # 去重，避免 .env 手写重复群号导致同群播报两遍
-    groups = list(dict.fromkeys(settings.broadcast_groups))
-    if not groups:
-        try:
-            groups = await asyncio.to_thread(_discover_groups)
-        except Exception as e:
-            logger.exception(f"发现播报群失败: {e}")
-            return
-        groups = list(dict.fromkeys(groups))
     if not groups:
         logger.warning("没有可播报的群，跳过排行播报")
         return
-
-    # 群白名单：仅在 allowed_groups 内的群播报（未配置则不限制）
-    if settings.allowed_groups:
-        allowed = {int(g) for g in settings.allowed_groups}
-        groups = [g for g in groups if g in allowed]
-        if not groups:
-            logger.warning("没有白名单内的可播报群，跳过排行播报")
-            return
 
     for bot in bots:
         for gid in groups:
@@ -150,6 +115,20 @@ async def _run_broadcast() -> None:
                     logger.info(f"已向群 {gid} 发送群抽奖公告")
                 except Exception as e:
                     logger.warning(f"向群 {gid} 发送群抽奖公告失败: {e}")
+
+    # 活动提醒：明天有活动则提醒（搭 23:00 榜单播报时刻，幂等保证只提醒一次）
+    try:
+        await activity.remind_tomorrow(today)
+    except Exception as e:
+        logger.warning(f"活动提醒失败: {e}")
+
+    # 下月跑团日历：今天是本月最后一天 → 生成并发送下月日历图（同月只发一次）
+    if (today + day).month != today.month:
+        next_first = (today.replace(day=1) + datetime.timedelta(days=32)).replace(day=1)
+        try:
+            await activity.send_next_month_calendar(next_first)
+        except Exception as e:
+            logger.warning(f"发送下月跑团日历失败: {e}")
 
 
 def _rank_title(label: str, start: datetime.date, end: datetime.date) -> str:

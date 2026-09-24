@@ -12,9 +12,9 @@ from ..models.checkin_log import CheckinLog
 from ..models.daily_record import DailyRecord
 from ..models.manual_distance import ManualDistance
 from ..models.member import Member
+from . import checkin, timeutil
 from .providers import get_provider
 from .providers.base import DailyStats
-from . import checkin, timeutil
 
 
 def _write_record(
@@ -33,7 +33,7 @@ def _write_record(
         session.add(rec)
         try:
             # 提前 flush 触发 uq_daily_member_date_platform，捕获并发 upsert 竞态
-            #（后台回填历史 + 用户查询同时落库时，两个线程可能同时 select 到 None）。
+            # （后台回填历史 + 用户查询同时落库时，两个线程可能同时 select 到 None）。
             session.flush()
         except IntegrityError:
             # 别人已抢先插入：回滚本次 pending，重查已有行后覆盖
@@ -162,9 +162,13 @@ def undo_last_checkin(qq: str, session: Session) -> tuple[float, date | None]:
       4. checkin_day：该日若已无任何运动数据（含其它平台），删除打卡日，累计天数随之减少。
     SQLite 单条删除极快，可直接在事件循环内同步执行。
     """
-    last = session.execute(
-        select(CheckinLog).where(CheckinLog.member_qq == qq).order_by(CheckinLog.id.desc())
-    ).scalars().first()
+    last = (
+        session.execute(
+            select(CheckinLog).where(CheckinLog.member_qq == qq).order_by(CheckinLog.id.desc())
+        )
+        .scalars()
+        .first()
+    )
     if last is None:
         return 0.0, None
 
@@ -197,11 +201,15 @@ def undo_last_checkin(qq: str, session: Session) -> tuple[float, date | None]:
         rec.ascent_meters = round(max(0.0, (rec.ascent_meters or 0.0) - ascent), 2)
         rec.calories = max(0, (rec.calories or 0) - cal)
         rec.active_minutes = max(0, (rec.active_minutes or 0) - mins)
-        remaining_km = session.execute(
-            select(CheckinLog.distance_km).where(
-                CheckinLog.member_qq == qq, CheckinLog.record_date == d
+        remaining_km = (
+            session.execute(
+                select(CheckinLog.distance_km).where(
+                    CheckinLog.member_qq == qq, CheckinLog.record_date == d
+                )
             )
-        ).scalars().all()
+            .scalars()
+            .all()
+        )
         rec.max_activity_distance_km = round(max(remaining_km, default=0.0), 2)
         if (rec.activities_count or 0) <= 0 and not checkin.is_active_day(
             rec.distance_km, rec.active_minutes, rec.calories
@@ -212,14 +220,14 @@ def undo_last_checkin(qq: str, session: Session) -> tuple[float, date | None]:
     session.flush()
 
     # 该日若已无任何运动数据（含其它平台），删除打卡日
-    others = session.execute(
-        select(DailyRecord).where(
-            DailyRecord.member_qq == qq, DailyRecord.record_date == d
+    others = (
+        session.execute(
+            select(DailyRecord).where(DailyRecord.member_qq == qq, DailyRecord.record_date == d)
         )
-    ).scalars().all()
-    if not any(
-        checkin.is_active_day(r.distance_km, r.active_minutes, r.calories) for r in others
-    ):
+        .scalars()
+        .all()
+    )
+    if not any(checkin.is_active_day(r.distance_km, r.active_minutes, r.calories) for r in others):
         session.execute(
             delete(CheckinDay).where(CheckinDay.member_qq == qq, CheckinDay.record_date == d)
         )
@@ -259,6 +267,19 @@ def get_manual_distance(member_qq: str, session: Session) -> float:
     """查询成员的累计里程（无记录返回 0.0）。"""
     rec = session.get(ManualDistance, member_qq)
     return rec.total_distance_km if rec else 0.0
+
+
+def get_week_distance(member_qq: str, session: Session) -> float:
+    """查询成员本周累计里程（本周尚未记录时返回 0.0）。
+
+    week_distance_km 只在「本周有新增截图」时被 add_manual_distance 重置为本周值，
+    若 week_start 不是本周一，说明该值仍是上周旧值，不能当作本周累计展示。
+    """
+    rec = session.get(ManualDistance, member_qq)
+    if rec is None or not rec.week_distance_km:
+        return 0.0
+    this_monday = timeutil.today() - timedelta(days=timeutil.today().weekday())
+    return round(rec.week_distance_km, 2) if rec.week_start == this_monday else 0.0
 
 
 def clear_member_records(session: Session, qq: str) -> int:

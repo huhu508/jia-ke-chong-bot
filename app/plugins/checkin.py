@@ -38,4 +38,8 @@ async def handle_checkin(event: MessageEvent):
         f"· 累计打卡 {total} 天",
         f"· 本月打卡 {month} 天",
     ]
+    # 下一个里程碑倒计时：把「达成后被动触发」的彩蛋，补上「达成前主动引导」
+    next_m = checkin.next_milestone(total)
+    if next_m is not None:
+        lines.append(f"· 距下一个里程碑（{next_m} 天）还差 {next_m - total} 天")
     await checkin_cmd.finish("\n".join(lines))

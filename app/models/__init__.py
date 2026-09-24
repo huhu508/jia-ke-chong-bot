@@ -1,3 +1,4 @@
+from .activity import Activity
 from .base import Base
 from .checkin_day import CheckinDay
 from .checkin_log import CheckinLog
@@ -8,6 +9,7 @@ from .manual_distance import ManualDistance
 from .member import Member
 
 __all__ = [
+    "Activity",
     "Base",
     "Member",
     "DailyRecord",
