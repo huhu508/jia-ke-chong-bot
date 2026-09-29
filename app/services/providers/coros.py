@@ -12,7 +12,7 @@ from urllib.parse import parse_qs, urlencode, urlparse
 import httpx
 from nonebot.log import logger
 
-from .. import crypto, timeutil
+from .. import credentials, timeutil
 from .base import DailyStats, SportProvider
 
 
@@ -540,17 +540,9 @@ class CorosProvider(SportProvider):
 
     @staticmethod
     def _load_json(path: Path) -> Optional[dict]:
-        if not path.exists():
-            return None
-        try:
-            raw = json.loads(path.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError):
-            return None
-        return crypto.decrypt_json(raw)
+        # 复用 credentials 的加密 JSON 读取（含「非对象返回 None」防御）
+        return credentials.read_file(path)
 
     @staticmethod
     def _save_json(path: Path, data: dict) -> None:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(
-            json.dumps(crypto.encrypt_json(data), ensure_ascii=False, indent=2), encoding="utf-8"
-        )
+        credentials.write_file(path, data)

@@ -20,11 +20,23 @@ def _path(qq: str, platform: str) -> Path:
 
 
 def load(qq: str, platform: str) -> Optional[dict]:
-    p = _path(qq, platform)
-    if not p.exists():
+    return read_file(_path(qq, platform))
+
+
+def save(qq: str, platform: str, data: dict) -> None:
+    write_file(_path(qq, platform), data)
+
+
+def delete(qq: str, platform: str) -> None:
+    _path(qq, platform).unlink(missing_ok=True)
+
+
+def read_file(path: Path) -> Optional[dict]:
+    """读取一个加密 JSON 文件并解密；不存在/损坏/非对象返回 None。"""
+    if not path.exists():
         return None
     try:
-        raw = json.loads(p.read_text(encoding="utf-8"))
+        raw = json.loads(path.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError):
         return None
     result = crypto.decrypt_json(raw)
@@ -33,13 +45,9 @@ def load(qq: str, platform: str) -> Optional[dict]:
     return result if isinstance(result, dict) else None
 
 
-def save(qq: str, platform: str, data: dict) -> None:
-    p = _path(qq, platform)
-    p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(
+def write_file(path: Path, data: dict) -> None:
+    """把 dict 加密后写盘（自动建目录）。"""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
         json.dumps(crypto.encrypt_json(data), ensure_ascii=False, indent=2), encoding="utf-8"
     )
-
-
-def delete(qq: str, platform: str) -> None:
-    _path(qq, platform).unlink(missing_ok=True)

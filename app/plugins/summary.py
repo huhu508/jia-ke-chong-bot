@@ -134,9 +134,12 @@ def _format_summary(name: str, period: str, span: str, s: dict) -> str:
 
 def _empty_hint(name: str, period: str, span: str, bound: bool) -> str:
     if bound:
-        return f"{name} {period}（{span}）暂无运动数据。发「今日」同步当天，或让管理员「同步数据」补齐历史"
+        return (
+            f"{name} {period}（{span}）暂无运动数据，还没开张～"
+            "发「今日」同步当天，或让管理员「同步数据」补齐历史"
+        )
     return (
-        f"{name} {period}（{span}）暂无运动数据。\n"
+        f"{name} {period}（{span}）暂无运动数据，动起来就有啦 💪\n"
         "试试：① 发「绑定 coros / garmin」接入平台；② 其他 App 直接发运动截图，我会自动记录"
     )
 

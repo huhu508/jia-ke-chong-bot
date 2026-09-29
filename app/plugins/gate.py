@@ -10,6 +10,20 @@ from nonebot.message import event_preprocessor
 
 from ..config import settings
 
+# 白名单群号集合缓存：settings 是模块级单例、运行期不变，逐消息重建 set 是纯浪费；
+# 这里缓存为 frozenset，仅在 settings.allowed_groups 变化时重建（覆盖测试 monkeypatch 场景）。
+_ALLOWED_RAW: tuple = ()
+_ALLOWED_SET: frozenset[str] = frozenset()
+
+
+def _allowed() -> frozenset[str]:
+    global _ALLOWED_RAW, _ALLOWED_SET
+    raw = tuple(settings.allowed_groups)
+    if raw != _ALLOWED_RAW:
+        _ALLOWED_RAW = raw
+        _ALLOWED_SET = frozenset(str(g) for g in raw)
+    return _ALLOWED_SET
+
 
 @event_preprocessor
 async def gate_group(event):
@@ -18,5 +32,5 @@ async def gate_group(event):
         return
     if not settings.allowed_groups:
         return  # 未配置白名单 = 不限制（向后兼容）
-    if str(event.group_id) not in {str(g) for g in settings.allowed_groups}:
+    if str(event.group_id) not in _allowed():
         event.stop_propagation()

@@ -300,21 +300,21 @@ def sync_history(qq: str, platform: str, start: date, end: date) -> int:
 
     绑定平台 / 管理员同步时调用，补齐历史明细，供周榜（7 天）/月榜（最多 31 天）
     聚合出正确结果。内部自开 session（阻塞的网络 + 数据库调用），供 asyncio.to_thread
-    直接执行。逐日调用 provider.fetch_daily，单日失败不影响其它日期。返回成功回填天数。
+    直接执行。通过 provider.fetch_range 拉取——平台可实现「登录一次复用会话」
+    （如 Garmin 回填一个月历史只需登录一次），单日失败不影响其它日期。返回成功回填天数。
     """
     provider = get_provider(platform)
-    done = 0
-    d = start
     session = get_session()
     try:
-        while d < end:
-            try:
-                stats = provider.fetch_daily(qq, d)
-                _write_record(qq, d, provider.name, stats, session)
-                done += 1
-            except Exception as e:
-                logger.warning(f"回填 {qq} {d} 失败: {e}")
-            d += timedelta(days=1)
+        try:
+            stats_list = provider.fetch_range(qq, start, end)
+        except Exception as e:
+            logger.warning(f"回填 {qq}（{provider.name}）失败: {e}")
+            return 0
+        done = 0
+        for stats in stats_list:
+            _write_record(qq, stats.date, provider.name, stats, session)
+            done += 1
         return done
     finally:
         session.close()

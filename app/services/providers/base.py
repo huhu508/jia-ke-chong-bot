@@ -1,7 +1,8 @@
 from abc import ABC, abstractmethod
-from datetime import date
+from datetime import date, timedelta
 from typing import Optional
 
+from nonebot.log import logger
 from pydantic import BaseModel
 
 
@@ -39,3 +40,20 @@ class SportProvider(ABC):
     def fetch_daily(self, account: str, d: date) -> DailyStats:
         """拉取某账号某天的统一统计数据。为阻塞调用，需在线程中执行。"""
         raise NotImplementedError
+
+    def fetch_range(self, account: str, start: date, end: date) -> list[DailyStats]:
+        """拉取 ``[start, end)`` 区间的每日统计，按日期升序返回。
+
+        默认实现逐日调用 ``fetch_daily``；平台可覆盖为「登录一次复用会话」，
+        避免逐日重新认证（如回填一个月历史时）。单日失败仅记日志并跳过该天，
+        不中断整体；返回列表即「成功拉取的天」，调用方据此统计回填天数。
+        """
+        out: list[DailyStats] = []
+        d = start
+        while d < end:
+            try:
+                out.append(self.fetch_daily(account, d))
+            except Exception as e:
+                logger.warning(f"{self.name} 拉取 {account} {d} 失败: {e}")
+            d += timedelta(days=1)
+        return out

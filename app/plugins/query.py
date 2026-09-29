@@ -10,8 +10,7 @@ from sqlalchemy import select
 from ..db import get_session
 from ..models.daily_record import DailyRecord
 from ..models.member import Member
-from ..services import checkin, llm, sync, timeutil
-from ..services.cheers import format_pace
+from ..services import checkin, cheers, llm, sync, timeutil
 from ..services.providers.base import DailyStats
 from .admin import notify_gift_claim
 
@@ -19,30 +18,8 @@ query_cmd = on_command("今日", aliases={"步数", "今日运动", "运动"}, p
 
 
 def _format_stats(s: DailyStats) -> str:
-    # 顺序参考主流运动 App「用户最关心」：距离 / 配速 / 爬升 / 时长 / 消耗 / 心率 / 负荷。
-    # 静息心率已移除；值 >0 才显示，避免刷屏 0 值。步数也不再无条件展示——
-    # COROS 等跑步场景步数无意义（群里反馈「为什么一定要说步数」），有值才显示。
-    lines = [f"📅 {s.date}"]
-    if s.steps:
-        lines.append(f"👟 步数：{s.steps}")
-    if s.distance_km:
-        lines.append(f"📏 距离：{s.distance_km} km")
-    if s.avg_pace_sec_per_km:
-        lines.append(f"🏃 平均配速：{format_pace(s.avg_pace_sec_per_km)} /km")
-    if s.ascent_meters:
-        lines.append(f"⛰️ 爬升：{s.ascent_meters:.0f} m")
-    if s.active_minutes:
-        lines.append(f"⏱ 活动时长：{s.active_minutes} 分钟")
-    if s.calories:
-        lines.append(f"🔥 活动消耗：{s.calories} 千卡")
-    if s.avg_hr:
-        lines.append(f"💓 平均心率：{s.avg_hr} bpm")
-    if s.training_load:
-        lines.append(f"⚡ 运动负荷：{s.training_load:.0f}")
-    if s.max_activity_distance_km:
-        lines.append(f"🏆 单次最长：{s.max_activity_distance_km} km")
-    if s.sleep_hours:
-        lines.append(f"😴 睡眠：{s.sleep_hours} 小时")
+    # 值 >0 才显示（统一在 cheers.format_stat_lines 内处理），避免刷屏 0 值。
+    lines = [f"📅 {s.date}"] + cheers.format_stat_lines(s)
     if len(lines) == 1:
         lines.append("今日暂无运动记录")
     return "\n".join(lines)
@@ -55,22 +32,7 @@ def _format_manual(name: str, d: date, rec, total_km: float, week_km: float = 0.
     """
     lines = [f"📅 {d}"]
     if rec is not None:
-        if rec.steps:
-            lines.append(f"👟 步数：{rec.steps}")
-        if rec.distance_km:
-            lines.append(f"📏 距离：{rec.distance_km} km")
-        if rec.avg_pace_sec_per_km:
-            lines.append(f"🏃 平均配速：{format_pace(rec.avg_pace_sec_per_km)} /km")
-        if rec.ascent_meters:
-            lines.append(f"⛰️ 爬升：{rec.ascent_meters:.0f} m")
-        if rec.active_minutes:
-            lines.append(f"⏱ 活动时长：{rec.active_minutes} 分钟")
-        if rec.calories:
-            lines.append(f"🔥 活动消耗：{rec.calories} 千卡")
-        if rec.avg_hr:
-            lines.append(f"💓 平均心率：{rec.avg_hr} bpm")
-        if rec.max_activity_distance_km:
-            lines.append(f"🏆 单次最长：{rec.max_activity_distance_km} km")
+        lines += cheers.format_stat_lines(rec)
         if rec.activities_count:
             lines.append(f"🏷️ 今日已记录 {rec.activities_count} 次运动")
     if week_km:
@@ -130,6 +92,30 @@ async def _milestone_cheers(qq: str, nickname: str, bot=None, gid=None) -> str:
     return "\n\n" + "\n".join(parts)
 
 
+async def _daily_cheer(nickname: str, data) -> str:
+    """每日打卡后附带一句鼓励：LLM 生成，失败降级到 cheers 模板；无运动数据返回空串。
+
+    data 为 DailyStats（绑定平台）或 DailyRecord（截图记录），二者字段同名，统一 getattr 取值。
+    仅在「有运动数据」时才鼓励，避免成员当天没动、仅同步到步数也被硬夸。
+    """
+    if data is None:
+        return ""
+    d = {
+        "distance_km": getattr(data, "distance_km", 0) or 0,
+        "avg_pace_sec_per_km": getattr(data, "avg_pace_sec_per_km", 0) or 0,
+        "ascent_meters": getattr(data, "ascent_meters", 0) or 0,
+        "calories": getattr(data, "calories", 0) or 0,
+        "active_minutes": getattr(data, "active_minutes", 0) or 0,
+        "avg_hr": getattr(data, "avg_hr", 0) or 0,
+    }
+    if not checkin.is_active_day(d["distance_km"], d["active_minutes"], d["calories"]):
+        return ""
+    cheer = await asyncio.to_thread(llm.checkin_cheer, nickname, d)
+    if cheer:
+        return f"\n\n💪 {cheer}"
+    return f"\n\n{cheers.closer(d)}"
+
+
 async def build_today(qq: str, nickname: str, bot=None, gid=None) -> str:
     """构建「今日」查询结果文本（命令 handler 与自然语言路由共用，不直接 finish）。
 
@@ -148,6 +134,7 @@ async def build_today(qq: str, nickname: str, bot=None, gid=None) -> str:
             text = f"{nickname} 今日运动数据：\n{_format_stats(stats)}"
             text += f"\n\n{_checkin_badge(qq)}"
             text += await _milestone_cheers(qq, nickname, bot, gid)
+            text += await _daily_cheer(nickname, stats)
             return text
 
         # 未绑定 → 读截图记录（当日明细 + 累计里程）
@@ -163,7 +150,7 @@ async def build_today(qq: str, nickname: str, bot=None, gid=None) -> str:
 
         if rec is None and total <= 0:
             return (
-                "你还没有任何运动数据，试试下面任一方式：\n"
+                "还没开张呢，动起来就有数据啦 💪 试试下面任一方式：\n"
                 "① 绑定平台：发「绑定 garmin」（佳明，私聊填账号）或「绑定 coros」（高驰，私密授权链接）\n"
                 "② 其他平台（无开放接口的 App）：直接发运动截图，我会自动识别并记入今日数据和排行\n"
                 "绑定后发「今日」即可查询当日数据"
@@ -172,6 +159,7 @@ async def build_today(qq: str, nickname: str, bot=None, gid=None) -> str:
         text = _format_manual(nickname, today, rec, total, week)
         text += f"\n\n{_checkin_badge(qq)}"
         text += await _milestone_cheers(qq, nickname)
+        text += await _daily_cheer(nickname, rec)
         return text
     finally:
         session.close()

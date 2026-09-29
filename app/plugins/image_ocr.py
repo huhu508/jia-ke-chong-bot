@@ -91,25 +91,8 @@ def _is_too_small(img_bytes: bytes) -> bool:
 
 
 def _format_data(data: dict) -> list:
-    # 与 query.py 一致：值 >0 才显示，避免把未识别的 0 值刷屏。
-    lines = []
-    if data.get("distance_km"):
-        lines.append(f"📏 距离：{data['distance_km']} km")
-    if data.get("avg_pace_sec_per_km"):
-        lines.append(f"🏃 平均配速：{cheers.format_pace(data['avg_pace_sec_per_km'])} /km")
-    if data.get("steps"):
-        lines.append(f"👟 步数：{data['steps']}")
-    if data.get("ascent_meters"):
-        lines.append(f"⛰️ 爬升：{data['ascent_meters']:.0f} m")
-    if data.get("calories"):
-        lines.append(f"🔥 消耗：{data['calories']} 千卡")
-    if data.get("active_minutes"):
-        lines.append(f"⏱ 活动时长：{data['active_minutes']} 分钟")
-    if data.get("avg_hr"):
-        lines.append(f"💓 平均心率：{data['avg_hr']} bpm")
-    if data.get("sleep_hours"):
-        lines.append(f"😴 睡眠：{data['sleep_hours']} 小时")
-    return lines
+    # 值 >0 才显示（统一在 cheers.format_stat_lines 内处理），避免把未识别的 0 值刷屏。
+    return cheers.format_stat_lines(data)
 
 
 def _format_cheer(data: dict) -> str:
@@ -374,10 +357,10 @@ async def handle_image(bot: Bot, event: MessageEvent):
         fallback = f"{fest['name']}快乐！{km} km 跑得漂亮，继续加油～"
         cheer = await asyncio.to_thread(llm.festival_cheer, name, fest["name"], km)
         reply += f"\n\n🎊 {cheer or fallback}"
-    # 大模型补一句点评：失败返回 None，自动降级为纯数据回显，不影响主链路
-    comment = await asyncio.to_thread(llm.comment_checkin, name, data)
-    if comment:
-        reply += f"\n\n💬 {comment}"
+    # 大模型补一句鼓励：失败返回 None，自动降级为纯数据回显，不影响主链路
+    cheer = await asyncio.to_thread(llm.checkin_cheer, name, data)
+    if cheer:
+        reply += f"\n\n💪 {cheer}"
 
     # 群抽奖开奖：公告到当前群（状态表保证只触发一次）
     if lottery_result is not None:

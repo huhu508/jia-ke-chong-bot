@@ -35,6 +35,9 @@ _CLOSERS = [
     "不积跬步无以至千里，冲！",
     "今天已经赢过昨天的自己了。",
     "歇一歇，别让身体欠债。",
+    "坚持的人运气不会差，下回见！✨",
+    "每一次出门都在打败懒惰，牛！",
+    "路还长，脚步别停，慢慢来也很快。",
 ]
 
 # 时段问候（开场时偶尔带一句，让语气更自然）
@@ -136,3 +139,38 @@ def format_pace(sec_per_km: float) -> str:
         return ""
     m, s = divmod(int(round(sec_per_km)), 60)
     return f"{m}'{s:02d}\""
+
+
+def format_stat_lines(d, *, calories_label: str = "活动消耗") -> list[str]:
+    """把一份运动数据渲染成 emoji 行列表（值 >0 才显示），供查询/截图/汇总复用。
+
+    ``d`` 支持 dict 或带同名属性的对象（DailyStats / DailyRecord），统一 ``get``/``getattr`` 取值。
+    顺序参考主流运动 App「用户最关心」：步数 / 距离 / 配速 / 爬升 / 时长 / 消耗 / 心率 / 负荷 /
+    单次最长 / 睡眠。口径与 checkin.is_active_day 一致（消耗=运动消耗，非基础代谢）。
+    """
+    def g(k: str):
+        v = d.get(k) if isinstance(d, dict) else getattr(d, k, None)
+        return v or 0
+
+    lines: list[str] = []
+    if g("steps"):
+        lines.append(f"👟 步数：{g('steps')}")
+    if g("distance_km"):
+        lines.append(f"📏 距离：{g('distance_km')} km")
+    if g("avg_pace_sec_per_km"):
+        lines.append(f"🏃 平均配速：{format_pace(g('avg_pace_sec_per_km'))} /km")
+    if g("ascent_meters"):
+        lines.append(f"⛰️ 爬升：{g('ascent_meters'):.0f} m")
+    if g("active_minutes"):
+        lines.append(f"⏱ 活动时长：{g('active_minutes')} 分钟")
+    if g("calories"):
+        lines.append(f"🔥 {calories_label}：{g('calories')} 千卡")
+    if g("avg_hr"):
+        lines.append(f"💓 平均心率：{g('avg_hr')} bpm")
+    if g("training_load"):
+        lines.append(f"⚡ 运动负荷：{g('training_load'):.0f}")
+    if g("max_activity_distance_km"):
+        lines.append(f"🏆 单次最长：{g('max_activity_distance_km')} km")
+    if g("sleep_hours"):
+        lines.append(f"😴 睡眠：{g('sleep_hours')} 小时")
+    return lines

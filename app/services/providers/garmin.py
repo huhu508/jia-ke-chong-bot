@@ -1,6 +1,7 @@
-from datetime import date
+from datetime import date, timedelta
 
 from garminconnect import Garmin
+from nonebot.log import logger
 
 from .. import credentials
 from .base import DailyStats, SportProvider
@@ -54,12 +55,40 @@ class GarminProvider(SportProvider):
         credentials.save(qq, "garmin", {"email": email, "password": password, "is_cn": self._is_cn})
 
     def fetch_daily(self, qq: str, d: date) -> DailyStats:
+        cred = self._require_cred(qq)
+        client = Garmin(cred["email"], cred["password"], is_cn=cred.get("is_cn", True))
+        client.login()
+        return self._fetch_day(client, d)
+
+    def fetch_range(self, qq: str, start: date, end: date) -> list[DailyStats]:
+        """一次登录复用会话，逐日拉取 ``[start, end)`` 的统计数据（回填历史）。
+
+        覆盖默认的「逐日 fetch_daily（每天重新登录）」——回填一个月历史时，默认实现
+        会登录 31 次；这里登录一次即可，显著降低耗时与账号被封风险。单日失败跳过并
+        记日志，与默认实现语义一致（返回列表即成功拉取的天）。
+        """
+        cred = self._require_cred(qq)
+        client = Garmin(cred["email"], cred["password"], is_cn=cred.get("is_cn", True))
+        client.login()
+        out: list[DailyStats] = []
+        d = start
+        while d < end:
+            try:
+                out.append(self._fetch_day(client, d))
+            except Exception as e:
+                logger.warning(f"Garmin 回填 {qq} {d} 失败: {e}")
+            d += timedelta(days=1)
+        return out
+
+    @staticmethod
+    def _require_cred(qq: str) -> dict:
         cred = credentials.load(qq, "garmin")
         if not cred:
             raise RuntimeError("尚未绑定佳明，请私聊机器人发送「garmin绑定 邮箱 密码」")
-        client = Garmin(cred["email"], cred["password"], is_cn=cred.get("is_cn", True))
-        client.login()
+        return cred
 
+    def _fetch_day(self, client, d: date) -> DailyStats:
+        """用已登录的 client 拉取某天数据（fetch_daily / fetch_range 共用）。"""
         iso = d.isoformat()
         stats = DailyStats(date=d)
 
