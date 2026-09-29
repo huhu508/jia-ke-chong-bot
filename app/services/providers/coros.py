@@ -263,9 +263,10 @@ class CorosProvider(SportProvider):
             day_str = d.strftime("%Y%m%d")
             sport = self._query_sport_records(qq, day_str, day_str)
             parsed = self._parse_sport_records(sport)
-        except Exception:
-            # 距离等为附加数据，接口异常不影响步数等主指标
-            pass
+        except Exception as e:
+            # 距离等为附加数据，接口异常不影响步数等主指标；但仍登记告警，
+            # 避免运动记录接口故障时「有步数却无距离」被静默吞掉。
+            self._warn("sport_records", e, "拉取运动记录")
 
         stats.distance_km = parsed["total_distance_km"]
         stats.calories = parsed["total_calories"]

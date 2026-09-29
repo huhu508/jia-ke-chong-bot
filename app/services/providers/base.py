@@ -5,6 +5,8 @@ from typing import Optional
 from nonebot.log import logger
 from pydantic import BaseModel
 
+from .. import alert
+
 
 class DailyStats(BaseModel):
     """各平台统一后的每日统计数据。
@@ -57,3 +59,13 @@ class SportProvider(ABC):
                 logger.warning(f"{self.name} 拉取 {account} {d} 失败: {e}")
             d += timedelta(days=1)
         return out
+
+    def _warn(self, key: str, e: Exception, context: str = "") -> None:
+        """核心数据源接口/解析失败：记日志 + 登记运维告警（同 key 去重，见 services.alert）。
+
+        context 用人类可读短语（如「拉取活动列表」）；告警由每日播报搭车私聊管理员，
+        把「平台字段漂移 / 接口异常导致的静默缺数据」变成可感知的显性信号。
+        """
+        label = f"{self.name} {context}".strip()
+        logger.warning(f"{label} 失败: {e}")
+        alert.record(f"{self.name}:{key}", f"{label} 失败：{e}")

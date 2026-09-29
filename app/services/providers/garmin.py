@@ -96,7 +96,8 @@ class GarminProvider(SportProvider):
         raw: dict = {}
         try:
             raw = client.get_stats(iso) or {}
-        except Exception:
+        except Exception as e:
+            self._warn("stats", e, "拉取全天指标")
             raw = {}
 
         stats.steps = int(raw.get("totalSteps") or 0)
@@ -122,7 +123,8 @@ class GarminProvider(SportProvider):
         # 活动列表：爬升 / 单次最长 / 配速 / 心率 / 负荷（字段名随版本漂移，全部容错）
         try:
             acts = client.get_activities_by_date(iso, iso) or []
-        except Exception:
+        except Exception as e:
+            self._warn("activities", e, "拉取活动列表")
             acts = []
         self._apply_activity_metrics(stats, acts)
 

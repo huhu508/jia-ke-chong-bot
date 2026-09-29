@@ -14,7 +14,7 @@ from nonebot.log import logger
 from ..config import settings
 from ..db import get_session
 from ..models.member import Member
-from . import activity, checkin, ranking, retention, sync, timeutil
+from . import activity, alert, checkin, ranking, retention, sync, timeutil
 
 driver = get_driver()
 
@@ -56,6 +56,7 @@ async def _run_broadcast() -> None:
         await asyncio.to_thread(sync.sync_today_all)
     except Exception as e:
         logger.warning(f"同步今日数据失败（仍用已有数据播报）: {e}")
+        alert.record("sync_today_all", f"同步今日数据失败：{e}")
 
     # (scope, 标签, 起始, 结束) 三段榜单，按需追加
     periods: list[tuple[str, str, datetime.date, datetime.date]] = [
@@ -75,11 +76,26 @@ async def _run_broadcast() -> None:
             messages.append(ranking.format_leaderboards(r, _rank_title(label, start, end)))
         except Exception as e:
             logger.exception(f"{label}排行计算失败: {e}")
+            alert.record(f"ranking:{scope}", f"{label}排行计算失败：{e}")
     if not messages:
         return
 
     # 解析播报目标：bots 按 self_id 去重、群按白名单过滤（见 activity.resolve_targets）
     bots, groups = await activity.resolve_targets()
+
+    # 运维告警：把本次积累的关键故障（平台接口异常 / 同步失败 / 排行失败）私聊管理员，
+    # 先于群播报发出，让管理员第一时间察觉「数据可能悄悄缺失」。同 key 去重见 services.alert。
+    alerts = alert.drain()
+    if alerts and bots:
+        text = "⚠️ 甲壳虫运维提醒\n" + "\n".join(alerts)
+        for su in get_driver().config.superusers:
+            for bot in bots:
+                try:
+                    await bot.send_private_msg(user_id=int(su), message=text)
+                    break  # 一个 bot 发成功即可，避免多 bot 重复
+                except Exception as e:
+                    logger.warning(f"发送运维告警失败: {e}")
+
     if not bots:
         logger.warning("没有已连接的 OneBot Bot，跳过排行播报")
         return
