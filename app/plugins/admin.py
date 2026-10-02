@@ -14,6 +14,7 @@ from sqlalchemy import func, select
 
 from ..config import settings
 from ..db import get_session
+from ..models.checkin_log import CheckinLog
 from ..models.group import Group
 from ..models.manual_distance import ManualDistance
 from ..models.member import Member
@@ -30,6 +31,11 @@ status_cmd = on_command("机器状态", priority=5, block=True)
 sync_all_cmd = on_command("同步数据", priority=5, block=True)
 refresh_names_cmd = on_command("刷新昵称", aliases={"修复昵称", "同步昵称"}, priority=5, block=True)
 garmin_bind_cmd = on_command("garmin绑定", aliases={"佳明绑定"}, priority=5, block=True)
+checkin_logs_cmd = on_command("打卡记录", aliases={"截图记录", "打卡明细"}, priority=5, block=True)
+delete_checkin_cmd = on_command("删除打卡记录", aliases={"删除指定打卡", "撤销打卡记录"}, priority=5, block=True)
+
+# 管理员查看截图打卡记录时一次最多列出的条数（取最近 N 条，避免刷屏）
+_CHECKIN_LOG_LIMIT = 20
 
 # 平台展示名（绑定提示 / 状态 / 我的绑定 三处共用）
 _PLATFORM_LABELS = {
@@ -394,3 +400,71 @@ async def handle_refresh_names(bot: Bot, event: MessageEvent):
             session.close()
 
     await refresh_names_cmd.finish(f"✅ 昵称刷新完成：修正 {fixed} 个无效昵称（临时会话等）")
+
+
+@checkin_logs_cmd.handle()
+async def handle_checkin_logs(bot: Bot, event: MessageEvent, args: Message = CommandArg()):
+    if not is_superuser(event):
+        await checkin_logs_cmd.finish("仅管理员可执行")
+
+    qq = args.extract_plain_text().strip()
+    if not qq:
+        await checkin_logs_cmd.finish("用法：打卡记录 QQ号\n例如：打卡记录 937826956")
+
+    session = get_session()
+    try:
+        member = session.get(Member, qq)
+        name = member.display_name if member is not None else qq
+        logs = (
+            session.execute(
+                select(CheckinLog)
+                .where(CheckinLog.member_qq == qq)
+                .order_by(CheckinLog.id.desc())
+                .limit(_CHECKIN_LOG_LIMIT)
+            )
+            .scalars()
+            .all()
+        )
+    finally:
+        session.close()
+
+    if not logs:
+        await checkin_logs_cmd.finish(f"{name}（QQ {qq}）没有截图打卡记录")
+    lines = [f"📋 {name}（QQ {qq}）的截图打卡记录（最近 {len(logs)} 条）", "━━━━━━━━━━━━"]
+    for lg in logs:
+        lines.append(f"· #{lg.id}  {lg.record_date.month}月{lg.record_date.day}日  {lg.distance_km:.2f} km")
+    lines.append(f"发「删除打卡记录 {qq} 记录号」删除指定一条")
+    await checkin_logs_cmd.finish("\n".join(lines))
+
+
+@delete_checkin_cmd.handle()
+async def handle_delete_checkin(bot: Bot, event: MessageEvent, args: Message = CommandArg()):
+    if not is_superuser(event):
+        await delete_checkin_cmd.finish("仅管理员可执行")
+
+    parts = args.extract_plain_text().strip().split()
+    if len(parts) != 2 or not parts[1].isdigit():
+        await delete_checkin_cmd.finish(
+            "用法：删除打卡记录 QQ号 记录号\n例如：删除打卡记录 937826956 12"
+        )
+    qq, log_id = parts[0], int(parts[1])
+
+    session = get_session()
+    result = None
+    try:
+        result = sync.undo_checkin_by_id(qq, log_id, session)
+    except Exception as e:
+        logger.exception(f"管理员删除打卡失败: {e}")
+        await delete_checkin_cmd.finish(f"删除打卡失败：{e}")
+    finally:
+        session.close()
+
+    if result is None:
+        await delete_checkin_cmd.finish(
+            f"找不到 QQ {qq} 的 #{log_id} 记录，发「打卡记录 {qq}」查看可删记录"
+        )
+    dist, d = result
+    await delete_checkin_cmd.finish(
+        f"已删除 QQ {qq} 的记录 #{log_id}（{d.month}月{d.day}日 {dist} km），"
+        "累计里程与当日排行已同步扣回"
+    )

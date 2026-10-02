@@ -129,3 +129,54 @@ def test_counting_start_fallback_on_bad_config(monkeypatch):
 
     monkeypatch.setattr(settings, "semester_start", "not-a-date")
     assert checkin.counting_start() == timeutil.today()
+
+
+def test_current_streak_counts_back_from_today(db_session):
+    s = db_session
+    base = checkin.counting_start() + timedelta(days=20)
+    for i in range(3):
+        checkin.ensure_day("10001", base - timedelta(days=i), s)
+    s.commit()
+    assert checkin.current_streak("10001", s, today=base) == 3
+
+
+def test_current_streak_starts_from_yesterday_when_today_missing(db_session):
+    s = db_session
+    base = checkin.counting_start() + timedelta(days=20)
+    checkin.ensure_day("10001", base - timedelta(days=1), s)
+    checkin.ensure_day("10001", base - timedelta(days=2), s)
+    s.commit()
+    # 今天还没打卡不算断签，从昨天起算
+    assert checkin.current_streak("10001", s, today=base) == 2
+
+
+def test_current_streak_zero_when_broken(db_session):
+    s = db_session
+    base = checkin.counting_start() + timedelta(days=20)
+    checkin.ensure_day("10001", base - timedelta(days=2), s)
+    s.commit()
+    assert checkin.current_streak("10001", s, today=base) == 0
+
+
+def test_longest_streak(db_session):
+    s = db_session
+    base = checkin.counting_start() + timedelta(days=20)
+    for i in range(3):  # 连续 3 天（今天往回）
+        checkin.ensure_day("10001", base - timedelta(days=i), s)
+    for i in range(5):  # 更早连续 5 天，中间隔断
+        checkin.ensure_day("10001", base - timedelta(days=10 + i), s)
+    s.commit()
+    assert checkin.longest_streak("10001", s) == 5
+
+
+def test_milestone_progress():
+    assert checkin.milestone_progress(0) == (10, 0)  # 距 10 天差 10，进度 0%
+    assert checkin.milestone_progress(10) == (56, 0)  # 已到 10，下一 66，差 56
+    assert checkin.milestone_progress(38) == (28, 50)  # 10→66 走了一半
+    assert checkin.milestone_progress(400) is None  # 全部达成
+
+
+def test_progress_bar():
+    assert checkin.progress_bar(0) == "░░░░░░░░░░ 0%"
+    assert checkin.progress_bar(50) == "▓▓▓▓▓░░░░░ 50%"
+    assert checkin.progress_bar(100) == "▓▓▓▓▓▓▓▓▓▓ 100%"

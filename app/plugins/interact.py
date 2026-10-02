@@ -10,7 +10,7 @@ from nonebot.log import logger
 from nonebot.params import CommandArg
 from nonebot.rule import to_me
 
-from ..services import llm
+from ..services import guards, llm
 from .history import build_range
 from .query import build_today
 from .ranking import build_ranking
@@ -63,7 +63,8 @@ _HELP_DETAILS = {
         "━━━━━━━━━━━━\n"
         "· 抽奖 [N] 候选… / 骰子 / 随机数 —— 群互动\n"
         "· 昵称 xxx —— 设置自己的显示昵称（昵称 清空 恢复）\n"
-        "· 机器状态 / 同步数据 —— 管理员"
+        "· 机器状态 / 同步数据 —— 管理员\n"
+        "· 打卡记录 QQ / 删除打卡记录 QQ 记录号 —— 管理员删打卡"
     ),
 }
 
@@ -127,6 +128,7 @@ _CHAT_HISTORY: dict[str, list[dict]] = {}
 _CHAT_LAST: dict[str, float] = {}
 _CHAT_TTL = 600.0  # 10 分钟无交互即清空上下文
 _MAX_TURNS = 6  # 最多保留 6 条（3 轮问答）
+_HISTORY_MAX_CHARS = 200  # 单条历史内容上限，防上下文污染/超长占用内存
 
 
 def _chat_history(qq: str, group_id) -> list[dict]:
@@ -141,8 +143,11 @@ def _chat_history(qq: str, group_id) -> list[dict]:
 def _remember(qq: str, group_id, question: str, answer: str) -> None:
     key = (group_id, qq)
     hist = _CHAT_HISTORY.setdefault(key, [])
-    hist.append({"role": "user", "content": question})
-    hist.append({"role": "assistant", "content": answer})
+    # 只存清洗后的提问与回答，各自截断，避免上下文污染 / 超长占用内存
+    q = guards.clean_question(question, _HISTORY_MAX_CHARS)
+    a = (answer or "")[:_HISTORY_MAX_CHARS]
+    hist.append({"role": "user", "content": q})
+    hist.append({"role": "assistant", "content": a})
     if len(hist) > _MAX_TURNS:
         del hist[: len(hist) - _MAX_TURNS]
     _CHAT_LAST[key] = time.time()
@@ -211,9 +216,16 @@ at_me = on_message(rule=to_me(), priority=99, block=True)
 async def handle_at(bot: Bot, event: MessageEvent):
     if not isinstance(event, GroupMessageEvent):
         return
-    question = event.get_plaintext().strip()
+    question = guards.clean_question(event.get_plaintext())
     if not question:
         await at_me.finish(HELP_OVERVIEW)
+
+    # 注入拦截：本地命中「指令覆盖/越权」类注入时，不给 LLM、不记上下文，直接固定拒绝。
+    if guards.looks_like_injection(question):
+        await at_me.finish(
+            "我是甲壳虫，这个群的运动数据机器人，只聊运动和健康生活话题、查数据、解读训练，"
+            "不会扮演别的角色或透露内部设定。有运动相关的事尽管找我～"
+        )
 
     qq = event.get_user_id()
 

@@ -14,6 +14,7 @@ from app.services.sync import (
     add_manual_distance,
     log_checkin,
     record_manual_activity,
+    undo_checkin_by_id,
     undo_last_checkin,
 )
 
@@ -150,6 +151,67 @@ def test_undo_last_checkin_removes_record_when_zero(db_session):
     assert rec is None  # 当日 manual 明细归零后整行删除
 
     assert undo_last_checkin("111", db_session) == (0.0, None)  # 已无明细
+
+
+def test_undo_checkin_by_id_reverts_specific(db_session):
+    m = Member(qq="111", nickname="甲")
+    db_session.add(m)
+    db_session.commit()
+
+    d = date.today()
+    # 三次截图打卡，分别 5 / 3 / 4 km
+    for km in (5.0, 3.0, 4.0):
+        add_manual_distance(m, km, db_session)
+        record_manual_activity(m, d, DailyStats(date=d, distance_km=km), db_session)
+        log_checkin("111", d, km, db_session)
+
+    logs = (
+        db_session.execute(
+            select(CheckinLog).where(CheckinLog.member_qq == "111").order_by(CheckinLog.id)
+        )
+        .scalars()
+        .all()
+    )
+    assert len(logs) == 3
+    middle_id = logs[1].id  # 删除中间那条 3 km
+
+    dist, dd = undo_checkin_by_id("111", middle_id, db_session)
+    assert dist == 3.0
+    assert dd == d
+
+    md = db_session.get(ManualDistance, "111")
+    assert md.total_distance_km == 9.0  # 5 + 4
+
+    rec = db_session.execute(
+        select(DailyRecord).where(
+            DailyRecord.member_qq == "111", DailyRecord.platform == "manual"
+        )
+    ).scalar_one()
+    assert rec.distance_km == 9.0
+    assert rec.activities_count == 2
+    assert rec.max_activity_distance_km == 5.0  # 剩余 5 与 4，重建 max
+
+    remaining = (
+        db_session.execute(
+            select(CheckinLog).where(CheckinLog.member_qq == "111").order_by(CheckinLog.id)
+        )
+        .scalars()
+        .all()
+    )
+    assert [lg.distance_km for lg in remaining] == [5.0, 4.0]
+
+
+def test_undo_checkin_by_id_not_found(db_session):
+    m = Member(qq="111", nickname="甲")
+    db_session.add(m)
+    db_session.commit()
+    d = date.today()
+    add_manual_distance(m, 5.0, db_session)
+    record_manual_activity(m, d, DailyStats(date=d, distance_km=5.0), db_session)
+    log_checkin("111", d, 5.0, db_session)
+
+    assert undo_checkin_by_id("111", 9999, db_session) is None  # 不存在
+    assert undo_checkin_by_id("222", 1, db_session) is None  # 不属于该成员
 
 
 def test_member_display_name_priority(db_session):

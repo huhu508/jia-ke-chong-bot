@@ -11,13 +11,14 @@
 from collections import defaultdict
 from datetime import date
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from ..db import get_session
 from ..models.daily_record import DailyRecord
 from ..models.manual_distance import ManualDistance
 from ..models.member import Member
+from . import timeutil
 from .checkin import is_active_day
 
 _TOP_N = 10
@@ -103,6 +104,24 @@ def compute_range_rankings(
     finally:
         if own_session:
             session.close()
+
+
+def today_distance_rank(qq: str, session: Session, d: date | None = None) -> int | None:
+    """该成员某日（默认今天）运动距离在群内的名次（1 起）；当日无距离数据返回 None。
+
+    复用 daily_record 按成员聚合距离，与今日距离榜同口径。``d`` 参数供测试注入固定日期。
+    """
+    d = d or timeutil.today()
+    rows = session.execute(
+        select(DailyRecord.member_qq, func.sum(DailyRecord.distance_km))
+        .where(DailyRecord.record_date == d)
+        .group_by(DailyRecord.member_qq)
+    ).all()
+    dists = {r[0]: float(r[1] or 0.0) for r in rows if float(r[1] or 0.0) > 0}
+    mine = dists.get(qq)
+    if mine is None:
+        return None
+    return sum(1 for v in dists.values() if v > mine) + 1
 
 
 def _fmt_rank(items: list[tuple[str, float]], unit: str, fmt: str) -> str:

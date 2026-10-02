@@ -1,4 +1,5 @@
 import json
+import time
 from datetime import date, timedelta
 
 from nonebot.log import logger
@@ -151,8 +152,8 @@ def log_checkin(
     session.commit()
 
 
-def undo_last_checkin(qq: str, session: Session) -> tuple[float, date | None]:
-    """撤销某成员最近一次截图打卡，返回 (回退距离, 打卡日期)；无记录返回 (0.0, None)。
+def _undo_checkin_log(session: Session, log: CheckinLog) -> tuple[float, date]:
+    """撤销一条**指定**截图打卡记录，返回 (回退距离, 打卡日期)。
 
     完整回退四处，保证累计里程 / 当日明细 / 打卡天数一致：
       1. manual_distance：total / 本周累计各扣回该次距离（跨周时本周值可能已重置，只扣本周一的）；
@@ -162,21 +163,12 @@ def undo_last_checkin(qq: str, session: Session) -> tuple[float, date | None]:
       4. checkin_day：该日若已无任何运动数据（含其它平台），删除打卡日，累计天数随之减少。
     SQLite 单条删除极快，可直接在事件循环内同步执行。
     """
-    last = (
-        session.execute(
-            select(CheckinLog).where(CheckinLog.member_qq == qq).order_by(CheckinLog.id.desc())
-        )
-        .scalars()
-        .first()
-    )
-    if last is None:
-        return 0.0, None
-
-    dist = last.distance_km or 0.0
-    ascent = last.ascent_meters or 0.0
-    cal = last.calories or 0
-    mins = last.active_minutes or 0
-    d = last.record_date
+    qq = log.member_qq
+    dist = log.distance_km or 0.0
+    ascent = log.ascent_meters or 0.0
+    cal = log.calories or 0
+    mins = log.active_minutes or 0
+    d = log.record_date
 
     md = session.get(ManualDistance, qq)
     if md is not None:
@@ -185,8 +177,9 @@ def undo_last_checkin(qq: str, session: Session) -> tuple[float, date | None]:
         if md.week_start == that_monday:
             md.week_distance_km = round(max(0.0, (md.week_distance_km or 0.0) - dist), 2)
 
-    # 先删这条明细，后续重建 max 时只统计该日剩余截图
-    session.delete(last)
+    # 先删这条明细并落库，让下方「重建 max」与「判断当日是否还有数据」只看到剩余截图
+    session.delete(log)
+    session.flush()
 
     rec = session.execute(
         select(DailyRecord).where(
@@ -215,9 +208,8 @@ def undo_last_checkin(qq: str, session: Session) -> tuple[float, date | None]:
             rec.distance_km, rec.active_minutes, rec.calories
         ):
             session.delete(rec)
-
-    # 落库上述 delete，让下方查询只看到真实剩余的当日明细
-    session.flush()
+            # 让下方 others 查询也能看到该行已删，正确判定当日是否还有任何运动数据
+            session.flush()
 
     # 该日若已无任何运动数据（含其它平台），删除打卡日
     others = (
@@ -234,6 +226,34 @@ def undo_last_checkin(qq: str, session: Session) -> tuple[float, date | None]:
 
     session.commit()
     return dist, d
+
+
+def undo_last_checkin(qq: str, session: Session) -> tuple[float, date | None]:
+    """撤销某成员最近一次截图打卡，返回 (回退距离, 打卡日期)；无记录返回 (0.0, None)。"""
+    last = (
+        session.execute(
+            select(CheckinLog).where(CheckinLog.member_qq == qq).order_by(CheckinLog.id.desc())
+        )
+        .scalars()
+        .first()
+    )
+    if last is None:
+        return 0.0, None
+    return _undo_checkin_log(session, last)
+
+
+def undo_checkin_by_id(
+    qq: str, checkin_log_id: int, session: Session
+) -> tuple[float, date] | None:
+    """删除某成员**指定 id** 的截图打卡记录（管理员用），返回 (回退距离, 打卡日期)。
+
+    记录不存在或不属于该成员时返回 None（不做任何修改）。与 undo_last_checkin 共用
+    _undo_checkin_log，回退逻辑完全一致，只是定位到「任意一条」而非「最近一条」。
+    """
+    log = session.get(CheckinLog, checkin_log_id)
+    if log is None or log.member_qq != qq:
+        return None
+    return _undo_checkin_log(session, log)
 
 
 def add_manual_distance(member: Member, distance_km: float, session: Session) -> float:
@@ -327,6 +347,8 @@ def sync_today_all() -> int:
     榜单会因为还没回填到今天而显示空。逐成员调用 sync_daily（各自自开 session），
     单成员失败不影响其它成员。阻塞（网络 + DB），供 asyncio.to_thread 直接执行。
     """
+    global _sync_today_all_at
+    _sync_today_all_at = time.time()  # 记录本次全量同步时刻，供节流复用
     session = get_session()
     try:
         targets = [
@@ -345,3 +367,23 @@ def sync_today_all() -> int:
         except Exception as e:
             logger.warning(f"同步 {qq}（{platform}）今日数据失败: {e}")
     return ok
+
+
+# 全量同步的进程内节流时间戳（bot 单进程运行，模块级即可）。「今日群内第 N 名」这类
+# 高频交互场景需要全群当天数据齐全（截图/绑定成员同口径），但没必要每次都拉全成员
+# 平台接口——距上次全量同步不足 _SYNC_TODAY_ALL_MIN_INTERVAL_SEC 秒就复用上次结果。
+_sync_today_all_at = 0.0
+_SYNC_TODAY_ALL_MIN_INTERVAL_SEC = 600.0  # 10 分钟
+
+
+def sync_today_all_throttled(
+    min_interval_sec: float = _SYNC_TODAY_ALL_MIN_INTERVAL_SEC,
+) -> int:
+    """带节流的全量同步：距上次全量同步不足 min_interval_sec 秒则跳过，返回 0。
+
+    供「今日群内第 N 名」等高频名次场景调用，避免每次截图/今日查询都拉全成员平台接口；
+    榜单播报与「排行」命令仍走无节流的 sync_today_all 保证最终口径。
+    """
+    if time.time() - _sync_today_all_at < min_interval_sec:
+        return 0
+    return sync_today_all()

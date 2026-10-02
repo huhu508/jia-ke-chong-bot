@@ -5,7 +5,7 @@ from datetime import date
 from app.models.daily_record import DailyRecord
 from app.models.manual_distance import ManualDistance
 from app.models.member import Member
-from app.services.ranking import compute_range_rankings
+from app.services.ranking import compute_range_rankings, today_distance_rank
 
 
 def _seed(db_session):
@@ -83,3 +83,25 @@ def test_week_rankings_ignore_stale_manual_distance(db_session):
     )
     # 乙本周无任何记录，上周的 20 km 不得进入本周榜
     assert dict(r["distance"]) == {}
+
+
+def test_today_distance_rank(db_session):
+    db_session.add(Member(qq="111", nickname="甲", platform="garmin"))
+    db_session.add(Member(qq="222", nickname="乙", platform=""))
+    db_session.add(Member(qq="333", nickname="丙", platform=""))
+    d = date(2026, 9, 20)
+    db_session.add(
+        DailyRecord(member_qq="111", record_date=d, platform="garmin", distance_km=10.0)
+    )
+    db_session.add(
+        DailyRecord(member_qq="222", record_date=d, platform="manual", distance_km=5.0)
+    )
+    db_session.add(
+        DailyRecord(member_qq="333", record_date=d, platform="manual", distance_km=15.0)
+    )
+    db_session.commit()
+    assert today_distance_rank("333", db_session, d=d) == 1
+    assert today_distance_rank("111", db_session, d=d) == 2
+    assert today_distance_rank("222", db_session, d=d) == 3
+    # 当日无距离记录 → 不参与名次
+    assert today_distance_rank("999", db_session, d=d) is None

@@ -12,6 +12,26 @@
 
 import re
 
+
+def _normalize_number(raw: str) -> str:
+    """把 OCR 数字串归一成可 ``float()`` / ``int()`` 的字符串。
+
+    逗号有两种含义，需区分（部分 App 更新字体后小数点被渲染成逗号，见 Sigma「6,23」）：
+      - 千分位「1,234」→「1234」：已有小数点，或逗号后恰好 3 位数字；
+      - 小数逗号「6,23」→「6.23」：逗号后 1~2 位数字（欧式小数写法）。
+    """
+    raw = raw.strip()
+    if "," not in raw:
+        return raw
+    if "." in raw:
+        # 已有小数点，逗号只能是千分位：1,234.5 → 1234.5
+        return raw.replace(",", "")
+    last = raw.rsplit(",", 1)[1]
+    if re.fullmatch(r"\d{3}", last):
+        return raw.replace(",", "")  # 千分位：1,234 → 1234
+    return raw.replace(",", ".")  # 小数逗号：6,23 → 6.23
+
+
 # ---------------------------------------------------------------------------
 # 纯文本解析（兜底）
 # ---------------------------------------------------------------------------
@@ -89,17 +109,17 @@ def parse_activity(text: str) -> dict:
         if m:
             v = m.group(1)
     if v is not None:
-        data["distance_km"] = float(v.replace(",", ""))
+        data["distance_km"] = float(_normalize_number(v))
 
     v = _nearby_number(text, ["步数", "steps"])
     if v is not None:
-        data["steps"] = int(v.replace(",", ""))
+        data["steps"] = int(_normalize_number(v))
 
     v = _nearby_number(
         text, ["消耗", "卡路里", "千卡", "干卡", "大卡", "kcal", "kilocalorie", "calorie"]
     )
     if v is not None:
-        data["calories"] = int(v.replace(",", ""))
+        data["calories"] = int(_normalize_number(v))
 
     minutes = _nearby_duration(
         text, ["运动时长", "运动时间", "时长", "时间", "duration", "workout time"]
@@ -115,7 +135,7 @@ def parse_activity(text: str) -> dict:
         text, ["爬升", "累计爬升", "爬升高度", "elevation gain", "elevation", "ascent", "climb"]
     )
     if v is not None:
-        data["ascent_meters"] = float(v.replace(",", ""))
+        data["ascent_meters"] = float(_normalize_number(v))
 
     seconds = _nearby_pace(text, ["配速", "平均配速", "pace", "average pace"])
     if seconds is not None:
@@ -123,7 +143,7 @@ def parse_activity(text: str) -> dict:
 
     v = _nearby_number(text, ["平均心率", "avg hr", "average hr", "心率"])
     if v is not None:
-        data["avg_hr"] = int(v.replace(",", ""))
+        data["avg_hr"] = int(_normalize_number(v))
 
     return data
 
@@ -150,7 +170,7 @@ _FIELD_SPECS = [
             "米": 0.001,
         },
         "kind": "decimal",
-        "convert": lambda v: float(v.replace(",", "")),
+        "convert": lambda v: float(_normalize_number(v)),
     },
     {
         "key": "calories",
@@ -173,7 +193,7 @@ _FIELD_SPECS = [
         ],
         "units": ["kcal", "千卡", "大卡", "干卡"],
         "kind": "int",
-        "convert": lambda v: int(v.replace(",", "")),
+        "convert": lambda v: int(_normalize_number(v)),
     },
     {
         "key": "active_minutes",
@@ -196,7 +216,7 @@ _FIELD_SPECS = [
         "labels": ["步数", "steps", "step count", "total steps"],
         "units": [],
         "kind": "int",
-        "convert": lambda v: int(v.replace(",", "")),
+        "convert": lambda v: int(_normalize_number(v)),
     },
     {
         "key": "sleep_hours",
@@ -218,7 +238,7 @@ _FIELD_SPECS = [
         ],
         "units": ["m", "米"],
         "kind": "decimal",
-        "convert": lambda v: float(v.replace(",", "")),
+        "convert": lambda v: float(_normalize_number(v)),
     },
     {
         "key": "avg_pace_sec_per_km",
@@ -232,7 +252,7 @@ _FIELD_SPECS = [
         "labels": ["平均心率", "avg hr", "average hr", "average heart rate", "心率"],
         "units": ["bpm"],
         "kind": "int",
-        "convert": lambda v: int(v.replace(",", "")),
+        "convert": lambda v: int(_normalize_number(v)),
     },
 ]
 
@@ -257,11 +277,62 @@ _QUALIFIER_WORDS = (
     "剩余",
 )
 
+# 食物等效 / 非运动数值标记：Sigma 等 App 会在「消耗大卡」旁附「=1.4 个苹果」这类
+# 「相当于 N 个食物」的趣味数据。OCR/视觉偶发把它误读成消耗值（如「=1.4个」→ 1 千卡），
+# 含这些标记的框一律不作为数值候选，避免「6 km 只消耗 1 千卡」的离谱结果。
+_FOOD_EQUIVALENT_MARKERS = (
+    # 等价符号/词
+    "≈",
+    "≒",
+    "～",
+    "~",
+    "=",
+    "约等于",
+    "相当于",
+    "等效",
+    "约合",
+    # 食物量词（运动指标框从不带这类量词）
+    "个",
+    "份",
+    "碗",
+    "杯",
+    "根",
+    "片",
+    "块",
+    "勺",
+    "盘",
+    "只",
+    # 常见食物名
+    "苹果",
+    "香蕉",
+    "米饭",
+    "汉堡",
+    "鸡蛋",
+    "面包",
+    "披萨",
+    "蛋糕",
+    "饼干",
+    "巧克力",
+    "可乐",
+    "奶茶",
+    "鸡胸",
+    "牛肉",
+    "薯条",
+    "坚果",
+    "酸奶",
+    "牛奶",
+)
+
+
+def _has_food_marker(text: str) -> bool:
+    """判断框文本是否含「食物等效」类标记（如「=1.4个」「≈2 碗米饭」）。"""
+    return any(w in text for w in _FOOD_EQUIVALENT_MARKERS)
+
 
 def _extract_number(text: str, allow_decimal: bool = True):
-    """从框文本 search 提取数字串（排除时间/配速/温度），返回字符串或 None。"""
+    """从框文本 search 提取数字串（排除时间/配速/温度/食物等效），返回字符串或 None。"""
     t = text.strip()
-    if _NUMBER_EXCLUDE.search(t):
+    if _NUMBER_EXCLUDE.search(t) or _has_food_marker(t):
         return None
     pat = r"\d[\d,]*(?:\.\d+)?" if allow_decimal else r"\d[\d,]*"
     m = re.search(pat, t)
@@ -285,7 +356,7 @@ def _extract_duration(text: str):
     # 纯数字（配合「min/分钟」单位框，如 Keep 顶部「112」）
     m = re.fullmatch(r"(\d[\d,]*)", t)
     if m:
-        return int(m.group(1).replace(",", ""))
+        return int(_normalize_number(m.group(1)))
     return None
 
 
@@ -323,7 +394,7 @@ def _make_scaled_extractor(spec):
 
     def _extract(text: str):
         t = text.strip()
-        if _NUMBER_EXCLUDE.search(t):
+        if _NUMBER_EXCLUDE.search(t) or _has_food_marker(t):
             return None
         pat = r"\d[\d,]*(?:\.\d+)?" if kind == "decimal" else r"\d[\d,]*"
         m = re.search(pat, t)
@@ -341,7 +412,7 @@ def _make_scaled_extractor(spec):
                 break
         if factor == 1.0:
             return raw
-        val = float(raw.replace(",", "")) * factor
+        val = float(_normalize_number(raw)) * factor
         return f"{val:g}" if kind == "decimal" else str(int(round(val)))
 
     return _extract
@@ -434,6 +505,11 @@ def _extract_field(items, spec):
                 continue
             # 短标签子串陷阱：避免「心率」误匹配「最大心率」等带修饰词的框
             if any(q in t for q in _QUALIFIER_WORDS):
+                continue
+            # 标签框自身含数字 → 是「距离 6.23 公里」「海拔爬升为 0」这类描述/合并句，
+            # 不是纯标签。当作锚点会把相邻句的数值交叉关联（距离取到爬升的 0、爬升取到
+            # 距离的 6.23）。真正的纯标签（距离/配速/心率…）从不含数字，跳过安全。
+            if re.search(r"\d", t):
                 continue
             v = _value_near(items, it, extractor)
             if v is not None:
@@ -554,6 +630,12 @@ _VALID_RANGES = {
 # 距离 + 时长交叉校验的速度上限（km/h），超过即「距离/时长」至少一个识别错。
 _MAX_SPEED_KMH = 30.0
 
+# 卡路里与距离的合理比值区间（千卡/公里）。跑步/骑行/徒步等每公里消耗在此量级：
+# 低于下限多为「食物等效」数被误读成消耗（如 6 km 读成 1 千卡 = 0.16 千卡/km），
+# 高于上限多为把整日/汇总总量误读成单次消耗。超区间仅丢弃 calories（非核心字段）。
+_MIN_KCAL_PER_KM = 10.0
+_MAX_KCAL_PER_KM = 400.0
+
 
 def sanitize_activity(data: dict) -> tuple[dict, str | None]:
     """对 OCR 识别结果做合理性校验，返回 ``(清洗后的数据, 拒绝原因或 None)``。
@@ -596,4 +678,54 @@ def sanitize_activity(data: dict) -> tuple[dict, str | None]:
         if v is not None and not (lo <= v <= hi):
             cleaned.pop(key, None)
 
+    # 卡路里 vs 距离交叉校验：仅当两者都存在时比较每公里消耗是否落在合理区间，
+    # 兜底拦截「食物等效」数被误读成消耗这类离谱值（OCR/视觉都可能犯）。只丢弃
+    # calories，不拖累距离等核心字段。
+    if cleaned.get("calories") is not None and cleaned.get("distance_km") is not None:
+        kcal_per_km = cleaned["calories"] / cleaned["distance_km"]
+        if not (_MIN_KCAL_PER_KM <= kcal_per_km <= _MAX_KCAL_PER_KM):
+            cleaned.pop("calories", None)
+
     return cleaned, reject
+
+
+# ---------------------------------------------------------------------------
+# 并行识别比对：本地 OCR 与视觉模型两套结果逐字段比对，找出分歧字段
+# ---------------------------------------------------------------------------
+
+# 各字段「相对误差」阈值：超过即判为分歧，触发视觉模型结合 OCR 结果二次看图。
+# 核心指标（距离/配速）与整数类（步数/心率）从严 5%；卡路里/时长/爬升等 OCR 本身
+# 更易误读的字段放宽到 10%，避免无谓多一次视觉调用。
+_FIELD_CONFLICT_RATIO = {
+    "distance_km": 0.05,
+    "avg_pace_sec_per_km": 0.05,
+    "steps": 0.05,
+    "avg_hr": 0.05,
+    "calories": 0.10,
+    "active_minutes": 0.10,
+    "ascent_meters": 0.10,
+    "sleep_hours": 0.10,
+}
+
+
+def find_field_conflicts(a: dict, b: dict) -> list[str]:
+    """比对两套已解析字段 dict，返回「两侧都有值且相对误差超阈值」的分歧字段名列表。
+
+    只在同一字段两侧都存在且值有意义时才算分歧；只有一侧有值不算（走缺失补齐逻辑）。
+    供「本地 OCR 与视觉模型并行识别」后判断是否需要视觉模型二次看图给出确定值。
+    """
+    conflicts: list[str] = []
+    for key, ratio in _FIELD_CONFLICT_RATIO.items():
+        va = a.get(key)
+        vb = b.get(key)
+        if va is None or vb is None:
+            continue
+        try:
+            va = float(va)
+            vb = float(vb)
+        except (ValueError, TypeError):
+            continue
+        denom = max(abs(va), abs(vb), 1e-9)
+        if abs(va - vb) / denom > ratio:
+            conflicts.append(key)
+    return conflicts

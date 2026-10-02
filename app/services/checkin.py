@@ -12,7 +12,7 @@
 
 import random
 from collections import Counter
-from datetime import date
+from datetime import date, timedelta
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
@@ -116,6 +116,75 @@ def next_milestone(total: int) -> int | None:
 
 def global_total(session: Session) -> int:
     return session.scalar(select(func.count()).select_from(CheckinDay)) or 0
+
+
+def _checkin_dates(qq: str, session: Session) -> set[date]:
+    """该成员所有打卡日期集合（供连续打卡统计复用）。"""
+    rows = session.execute(
+        select(CheckinDay.record_date).where(CheckinDay.member_qq == qq)
+    ).scalars().all()
+    return set(rows)
+
+
+def current_streak(qq: str, session: Session, today: date | None = None) -> int:
+    """当前连续打卡天数：从今天（或昨天）往回数连续有打卡的天数。
+
+    今天尚未打卡时从昨天起算——当天还没结束，不算断签，符合运动 App 惯例；
+    今天、昨天都没打卡才视为断签，返回 0。``today`` 参数供测试注入固定日期。
+    """
+    today = today or timeutil.today()
+    days = _checkin_dates(qq, session)
+    if not days:
+        return 0
+    cursor = today
+    if cursor not in days:
+        cursor -= timedelta(days=1)
+    if cursor not in days:
+        return 0
+    n = 0
+    while cursor in days:
+        n += 1
+        cursor -= timedelta(days=1)
+    return n
+
+
+def longest_streak(qq: str, session: Session) -> int:
+    """历史最长连续打卡天数（纯历史统计，不依赖今天）。"""
+    days = sorted(_checkin_dates(qq, session))
+    if not days:
+        return 0
+    best = cur = 1
+    for prev, d in zip(days, days[1:]):
+        if d - prev == timedelta(days=1):
+            cur += 1
+            best = max(best, cur)
+        else:
+            cur = 1
+    return best
+
+
+def milestone_progress(total: int) -> tuple[int, int] | None:
+    """返回 (距下一里程碑还差天数, 当前进度百分比 0~100)；无下一里程碑返回 None。
+
+    进度 = 从上一里程碑（或 0）到下一里程碑之间已走完的比例，配合 progress_bar 可视化。
+    """
+    nxt = next_milestone(total)
+    if nxt is None:
+        return None
+    prev = 0
+    for m in MILESTONES:
+        if m < nxt:
+            prev = m
+    remain = nxt - total
+    pct = round((total - prev) / (nxt - prev) * 100)
+    return remain, pct
+
+
+def progress_bar(pct: int, width: int = 10) -> str:
+    """把百分比渲染成 emoji 进度条：``▓▓▓░░░░░░ 30%``。"""
+    pct = max(0, min(100, pct))
+    filled = round(width * pct / 100)
+    return f"{'▓' * filled}{'░' * (width - filled)} {pct}%"
 
 
 def _milestone_key(m: int, qq: str) -> str:

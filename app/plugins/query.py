@@ -10,7 +10,7 @@ from sqlalchemy import select
 from ..db import get_session
 from ..models.daily_record import DailyRecord
 from ..models.member import Member
-from ..services import checkin, cheers, llm, sync, timeutil
+from ..services import checkin, cheers, llm, ranking, sync, timeutil
 from ..services.providers.base import DailyStats
 from .admin import notify_gift_claim
 
@@ -47,13 +47,25 @@ def _format_manual(name: str, d: date, rec, total_km: float, week_km: float = 0.
 
 
 def _checkin_badge(qq: str) -> str:
-    """生成「本学期第 x 次打卡」一行。用独立 session 读，避免与 sync_daily 的
-    跨 session 快照不一致（SQLite WAL 下长事务快照冻结，读不到刚提交的打卡日）。"""
+    """生成「本学期第 x 次打卡 + 连续打卡 + 今日名次」交互徽章区。用独立 session 读，
+    避免与 sync_daily 的跨 session 快照不一致（SQLite WAL 下长事务快照冻结，读不到刚提交的打卡日）。"""
     s = get_session()
     try:
-        return f"🎓 本学期第 {checkin.total_days(qq, s)} 次打卡"
+        total = checkin.total_days(qq, s)
+        streak = checkin.current_streak(qq, s)
+        rank = ranking.today_distance_rank(qq, s)
     finally:
         s.close()
+    lines = [f"🎓 本学期第 {total} 次打卡"]
+    if streak:
+        note = cheers.streak_note(streak)
+        line = f"🔥 连续打卡 {streak} 天"
+        if note:
+            line += f"（{note}）"
+        lines.append(line)
+    if rank is not None:
+        lines.append(f"🏅 今日群内第 {rank} 名")
+    return "\n".join(lines)
 
 
 async def _milestone_cheers(qq: str, nickname: str, bot=None, gid=None) -> str:
@@ -132,6 +144,12 @@ async def build_today(qq: str, nickname: str, bot=None, gid=None) -> str:
         if member is not None and member.platform:
             stats = await asyncio.to_thread(sync.sync_daily, member.qq, member.platform, today)
             text = f"{nickname} 今日运动数据：\n{_format_stats(stats)}"
+            # 「今日群内第 N 名」需全群当天数据齐全（截图 + 绑定成员同口径），
+            # 补齐其它绑定成员（带节流）；失败不阻断查询，名次可能略旧。
+            try:
+                await asyncio.to_thread(sync.sync_today_all_throttled)
+            except Exception as e:
+                logger.warning(f"同步全员今日数据失败（今日名次可能不全）: {e}")
             text += f"\n\n{_checkin_badge(qq)}"
             text += await _milestone_cheers(qq, nickname, bot, gid)
             text += await _daily_cheer(nickname, stats)

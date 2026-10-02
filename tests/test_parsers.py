@@ -2,6 +2,7 @@
 
 from app.services.parsers import (
     detect_page_kind,
+    find_field_conflicts,
     parse_activity,
     parse_activity_from_boxes,
     sanitize_activity,
@@ -149,3 +150,114 @@ def test_parse_boxes_label_avg_hr_ok():
     ]
     data = parse_activity_from_boxes(result)
     assert data["avg_hr"] == 160
+
+
+def test_parse_boxes_distance_comma_decimal():
+    # Sigma 换字体后小数点被 OCR 读成逗号：「6,23」应解析为 6.23 km，而非 623 km。
+    result = [
+        (_box(200.0, 300.0, w=60, h=50), "6,23", 0.99),  # 距离大字
+        (_box(200.0, 360.0), "km", 0.99),  # 单位（下方）
+    ]
+    data = parse_activity_from_boxes(result)
+    assert data["distance_km"] == 6.23
+
+
+def test_parse_boxes_int_thousands_comma():
+    # 千分位逗号（如消耗「1,234」）不应被误当小数点 → 仍为 1234
+    result = [
+        (_box(200.0, 200.0), "消耗", 0.99),
+        (_box(320.0, 200.0), "1,234", 0.99),
+    ]
+    data = parse_activity_from_boxes(result)
+    assert data["calories"] == 1234
+
+
+def test_parse_boxes_prose_label_not_anchor():
+    # 截图里混入「距离 6.23 公里」「海拔爬升为 0」这类描述句时，不应把它们当标签锚点
+    # 做空间关联，否则会交叉污染：距离取到爬升的 0、爬升取到距离的 6.23。
+    # 真正的「6.23 km」合并框应胜出，爬升不应被误提取。
+    result = [
+        (_box(1022.0, 229.0, w=80), "6.23 km", 0.99),  # 真正的距离（合并框）
+        (_box(428.0, 608.0, w=600), "距离 6.23 公里", 0.99),  # 描述句（含「距离」+数字）
+        (_box(334.5, 643.5, w=500), "海拔爬升为 0", 0.99),  # 描述句（含「爬升」+数字）
+    ]
+    data = parse_activity_from_boxes(result)
+    assert data.get("distance_km") == 6.23
+    assert "ascent_meters" not in data
+
+
+def test_find_field_conflicts_agree():
+    a = {"distance_km": 6.23, "calories": 400, "avg_hr": 160}
+    b = {"distance_km": 6.2, "calories": 405, "avg_hr": 161}
+    assert find_field_conflicts(a, b) == []
+
+
+def test_find_field_conflicts_disagree_distance():
+    # OCR 读成 623（逗号被当小数点前的旧 bug），视觉读成 6.23 → 距离判分歧
+    assert find_field_conflicts({"distance_km": 623.0}, {"distance_km": 6.23}) == ["distance_km"]
+
+
+def test_find_field_conflicts_one_side_only():
+    # 只有一侧有值 → 不算分歧（走缺失补齐逻辑）
+    assert find_field_conflicts({"distance_km": 6.23}, {}) == []
+    assert find_field_conflicts({}, {"distance_km": 6.23}) == []
+
+
+def test_find_field_conflicts_zero_vs_nonzero():
+    # 一侧读成 0、另一侧非 0 → 判分歧（0 是 OCR 的真实读数，值得复核）
+    assert find_field_conflicts({"distance_km": 0.0}, {"distance_km": 6.23}) == ["distance_km"]
+
+
+def test_find_field_conflicts_tolerance_boundary():
+    # 距离 5% 阈值：100 vs 105（4.76%）不判分歧；100 vs 106（5.66%）判分歧
+    assert find_field_conflicts({"distance_km": 100.0}, {"distance_km": 105.0}) == []
+    assert find_field_conflicts({"distance_km": 100.0}, {"distance_km": 106.0}) == ["distance_km"]
+
+
+def test_find_field_conflicts_calories_looser_tolerance():
+    # 卡路里 10% 容差：400 vs 430（约 7%）不判分歧；400 vs 450（约 11%）判分歧
+    assert find_field_conflicts({"calories": 400}, {"calories": 430}) == []
+    assert find_field_conflicts({"calories": 400}, {"calories": 450}) == ["calories"]
+
+
+def test_parse_boxes_food_equivalent_not_calories():
+    # Sigma 详情页：消耗大卡标签旁有「=1.4个」（≈1.4 个苹果）食物等效框，
+    # 不应被当作消耗值；真正的「346」大卡应胜出。
+    result = [
+        (_box(100.0, 200.0), "消耗大卡", 0.99),  # 标签（左）
+        (_box(260.0, 200.0), "346", 0.99),  # 消耗值（右，同行）
+        (_box(260.0, 260.0), "=1.4个", 0.99),  # 食物等效（下方，须被排除）
+    ]
+    data = parse_activity_from_boxes(result)
+    assert data["calories"] == 346
+
+
+def test_parse_boxes_food_equivalent_alone_is_ignored():
+    # 只有「=1.4个」没有真实消耗值时，不应把 1.4 当消耗
+    result = [
+        (_box(100.0, 200.0), "消耗大卡", 0.99),
+        (_box(260.0, 200.0), "=1.4个", 0.99),
+    ]
+    data = parse_activity_from_boxes(result)
+    assert "calories" not in data
+
+
+def test_sanitize_drop_absurd_calories_per_km():
+    # 6.23 km 只消耗 1 千卡（食物等效误读）→ 丢弃 calories，保留距离
+    cleaned, reject = sanitize_activity({"distance_km": 6.23, "calories": 1})
+    assert reject is None
+    assert "calories" not in cleaned
+    assert cleaned["distance_km"] == 6.23
+
+
+def test_sanitize_keeps_plausible_calories():
+    cleaned, reject = sanitize_activity({"distance_km": 6.23, "calories": 346})
+    assert reject is None
+    assert cleaned["calories"] == 346
+
+
+def test_sanitize_calories_without_distance_kept():
+    # 无距离无法做比值校验，calories 应原样保留（如纯步数/心率截图）
+    cleaned, reject = sanitize_activity({"calories": 300})
+    assert reject is None
+    assert cleaned["calories"] == 300

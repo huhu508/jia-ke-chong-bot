@@ -19,7 +19,7 @@ from PIL import Image, ImageOps
 
 from ..db import get_session
 from ..models.member import Member
-from ..services import checkin, cheers, llm, parsers, sync, timeutil
+from ..services import checkin, cheers, llm, parsers, ranking, sync, timeutil
 from ..services.member import get_or_create_member
 from ..services.ocr import recognize_boxes
 from ..services.providers.base import DailyStats
@@ -194,28 +194,53 @@ async def handle_image(bot: Bot, event: MessageEvent):
     except Exception as e:
         logger.warning(f"保存图片失败: {e}")
 
-    try:
-        result = await asyncio.to_thread(recognize_boxes, img_bytes)
-    except Exception as e:
-        logger.warning(f"[图片识别] qq={qq} OCR 识别失败: {e}")
-        return
+    # 并行识别：本地 OCR 与视觉模型同时跑（各自放线程池，互不阻塞），
+    # 拿到两套结果后逐字段比对，有分歧时视觉模型结合 OCR 结果二次看图给确定值。
+    async def _run_ocr():
+        try:
+            return await asyncio.to_thread(recognize_boxes, img_bytes)
+        except Exception as e:
+            logger.warning(f"[图片识别] qq={qq} OCR 识别失败: {e}")
+            return []
+
+    async def _run_vision():
+        # llm_vision_enabled 关闭 / 无 key 时 vision_extract 直接返回 None，截图不出本机
+        try:
+            return await asyncio.to_thread(llm.vision_extract, img_bytes) or {}
+        except Exception as e:
+            logger.warning(f"[图片识别] qq={qq} 视觉识别失败: {e}")
+            return {}
+
+    result, vision_data = await asyncio.gather(_run_ocr(), _run_vision())
 
     # 解析兜底：解析器异常不应拖垮整条 handler，静默跳过即可
     try:
         text = "\n".join(str(item[1]) for item in result)
         # 主路径：按框坐标做「标签—数值」空间关联；无结果时退回纯文本解析
-        data = parsers.parse_activity_from_boxes(result)
-        if not data:
-            data = parsers.parse_activity(text)
-        # 多模态兜底：本地 OCR 没认全关键字段（尤其距离）时，用视觉模型再看一次；
-        # 只补缺失字段、不覆盖本地已识别出的字段（本地坐标关联通常比视觉更准）。
-        if not data.get("distance_km"):
-            vision = await asyncio.to_thread(llm.vision_extract, img_bytes) or {}
-            if vision:
-                for k, v in vision.items():
-                    if k not in data:
-                        data[k] = v
-                logger.info(f"[图片识别] qq={qq} 本地缺 distance_km，视觉兜底补充: {vision}")
+        ocr_data = parsers.parse_activity_from_boxes(result)
+        if not ocr_data:
+            ocr_data = parsers.parse_activity(text)
+
+        # 合并：以本地 OCR 为准，缺失/0 的字段用视觉结果补齐
+        data = dict(ocr_data)
+        for k, v in vision_data.items():
+            if k not in data or not data.get(k):
+                data[k] = v
+
+        # 比对：两侧都有值且相对误差超阈值 → 视觉模型结合 OCR 二次看图给确定值
+        conflicts = parsers.find_field_conflicts(ocr_data, vision_data)
+        if conflicts:
+            recon = await asyncio.to_thread(
+                llm.vision_reconcile, img_bytes, ocr_data, vision_data, conflicts
+            ) or {}
+            for k in conflicts:
+                if k in recon:
+                    data[k] = recon[k]
+            logger.info(
+                f"[图片识别] qq={qq} 并行比对分歧 {conflicts}："
+                f"OCR={ {k: ocr_data.get(k) for k in conflicts} }，"
+                f"视觉={ {k: vision_data.get(k) for k in conflicts} }，复核={recon}"
+            )
     except Exception as e:
         logger.warning(f"[图片识别] qq={qq} 解析失败: {e}")
         return
@@ -285,12 +310,22 @@ async def handle_image(bot: Bot, event: MessageEvent):
             _format_cheer(data) + "\n\n⏳ 这张截图刚才已经记过啦，本次不重复累计"
         )
 
+    # 「今日群内第 N 名」需全群当天数据齐全：先同步已绑定成员的今日数据（带节流，
+    # 10 分钟内复用上次结果），让截图成员的名次与绑定成员同口径——否则会漏掉今天
+    # 还没查询过的绑定成员，出现「截图与 App 各自算、名次对不上」的问题。
+    try:
+        await asyncio.to_thread(sync.sync_today_all_throttled)
+    except Exception as e:
+        logger.warning(f"[图片识别] qq={qq} 同步全员今日数据失败（今日名次可能不全）: {e}")
+
     # 写库：SQLite 写入极快，直接在事件循环内同步执行，避免把同一个 session 传进
     # asyncio.to_thread（不同线程共享 Session 违反 SQLAlchemy 线程安全约定）。
     milestone_hits: list[int] = []
     fest = None
     gift_rank: int | None = None
     lottery_result: tuple[int, list[str]] | None = None
+    streak = 0
+    today_rank: int | None = None
     session = get_session()
     try:
         member = get_or_create_member(session, qq, name)
@@ -328,6 +363,9 @@ async def handle_image(bot: Bot, event: MessageEvent):
                 winner_names.append(m.display_name if m else w)
             lottery_result = (lt, winner_names)
         session.commit()
+        # 连续打卡 + 今日名次：落库后同 session 读，保证含本次刚写入的记录
+        streak = checkin.current_streak(qq, session)
+        today_rank = ranking.today_distance_rank(qq, session)
         # 全部落库成功后才标记去重：commit 失败不会漏标，重发仍能补记
         _mark_seen(img_md5, img_dhash)
     except Exception as e:
@@ -340,6 +378,14 @@ async def handle_image(bot: Bot, event: MessageEvent):
         _format_cheer(data)
         + f"\n\n✅ 已记入今日数据：本次 +{data['distance_km']} km，累计 {total} km，发「今日」即可查看"
     )
+    if streak:
+        note = cheers.streak_note(streak)
+        line = f"🔥 连续打卡 {streak} 天"
+        if note:
+            line += f"（{note}）"
+        reply += f"\n{line}"
+    if today_rank is not None:
+        reply += f"\n🏅 今日群内第 {today_rank} 名"
     # 里程碑彩蛋：AI 一句祝贺，失败降级模板
     for m in milestone_hits:
         cheer = await asyncio.to_thread(llm.milestone_cheer, name, m)

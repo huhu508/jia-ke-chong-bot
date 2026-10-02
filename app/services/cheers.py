@@ -174,3 +174,18 @@ def format_stat_lines(d, *, calories_label: str = "活动消耗") -> list[str]:
     if g("sleep_hours"):
         lines.append(f"😴 睡眠：{g('sleep_hours')} 小时")
     return lines
+
+
+def streak_note(n: int) -> str:
+    """连续打卡天数的专属鼓励（>=7 天才给，1~6 天不硬夸）；无对应档位返回空串。"""
+    if n >= 100:
+        return "连续破百，群里狠人！"
+    if n >= 66:
+        return "六六大顺，稳如老狗！"
+    if n >= 30:
+        return "一个月不间断，自律到可怕！"
+    if n >= 14:
+        return "两周不断，习惯长在身上了！"
+    if n >= 7:
+        return "一周连击，节奏起来了！"
+    return ""
