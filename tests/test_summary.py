@@ -35,9 +35,7 @@ def test_summary_weighted(db_session):
     )
     db_session.commit()
 
-    s = compute_member_summary(
-        "111", date(2026, 9, 19), date(2026, 9, 21), session=db_session
-    )
+    s = compute_member_summary("111", date(2026, 9, 19), date(2026, 9, 21), session=db_session)
 
     assert s["active_days"] == 2
     assert s["activities"] == 3
@@ -52,7 +50,11 @@ def test_summary_weighted(db_session):
 
 def test_parse_range_近N天():
     today = date.today()
-    assert parse_range("近30天") == (today - timedelta(days=29), today + timedelta(days=1), "近30天")
+    assert parse_range("近30天") == (
+        today - timedelta(days=29),
+        today + timedelta(days=1),
+        "近30天",
+    )
 
 
 def test_parse_range_近N个月():
@@ -105,17 +107,29 @@ def test_compute_daily_list_aggregates(db_session):
     db_session.add_all(
         [
             DailyRecord(
-                member_qq=qq, record_date=d1, platform="manual",
-                distance_km=5.0, active_minutes=30, activities_count=1,
+                member_qq=qq,
+                record_date=d1,
+                platform="manual",
+                distance_km=5.0,
+                active_minutes=30,
+                activities_count=1,
                 avg_pace_sec_per_km=300.0,
             ),
             DailyRecord(
-                member_qq=qq, record_date=d2, platform="manual",
-                distance_km=8.0, active_minutes=50, activities_count=1,
+                member_qq=qq,
+                record_date=d2,
+                platform="manual",
+                distance_km=8.0,
+                active_minutes=50,
+                activities_count=1,
             ),
             DailyRecord(
-                member_qq=qq, record_date=d2, platform="garmin",
-                distance_km=2.0, active_minutes=10, activities_count=1,
+                member_qq=qq,
+                record_date=d2,
+                platform="garmin",
+                distance_km=2.0,
+                active_minutes=10,
+                activities_count=1,
             ),
         ]
     )

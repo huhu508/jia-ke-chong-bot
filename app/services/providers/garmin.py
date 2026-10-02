@@ -150,7 +150,9 @@ class GarminProvider(SportProvider):
           - distance_km / active_minutes / calories：活动 distance/duration/calories 求和，
             而非 totalDistanceMeters（含日常步行）/ activeSeconds / activeKilocalories；
           - training_load：取活动 activityTrainingLoad（训练负荷）之和，
-            而非 aerobic/anaerobicTrainingEffect（训练效果 TE，0~5 分，语义不同）。
+            而非 aerobic/anaerobicTrainingEffect（训练效果 TE，0~5 分，语义不同）；
+          - avg_pace_sec_per_km：各活动配速按距离加权（不是「最长那次」的配速）；
+          - avg_hr：各活动心率按时长加权（时长越长的运动占比越高）。
         """
         total_dist_km = 0.0
         total_duration_s = 0.0
@@ -158,9 +160,10 @@ class GarminProvider(SportProvider):
         ascent = 0.0
         max_dist = 0.0
         load = 0.0
-        hrs: list[int] = []
-        best_pace = 0.0
-        best_dist = 0.0
+        hr_wsum = 0.0  # 心率 × 时长（按时长加权）
+        hr_w = 0.0
+        pace_wsum = 0.0  # 配速 × 距离（按距离加权）
+        pace_w = 0.0
 
         if isinstance(acts, dict):
             acts = acts.get("activityList", []) or []
@@ -183,16 +186,18 @@ class GarminProvider(SportProvider):
                 max_dist = max(max_dist, dist_km)
 
                 hr = a.get("averageHR") or a.get("averageHeartRate") or 0
-                if hr:
-                    hrs.append(int(hr))
+                dur_s = float(a.get("duration") or 0)
+                if hr and dur_s > 0:
+                    hr_wsum += int(hr) * dur_s
+                    hr_w += dur_s
 
                 # 训练负荷（activityTrainingLoad），不是训练效果（aerobic/anaerobicTrainingEffect）
                 load += float(a.get("activityTrainingLoad") or 0)
 
                 speed = float(a.get("averageSpeed") or 0)
-                if dist_km > best_dist and speed > 0:
-                    best_dist = dist_km
-                    best_pace = 1000.0 / speed  # m/s -> 秒/公里
+                if speed > 0 and dist_km > 0:
+                    pace_wsum += (1000.0 / speed) * dist_km  # m/s -> 秒/公里，按距离加权
+                    pace_w += dist_km
             except (TypeError, ValueError):
                 continue
 
@@ -203,8 +208,8 @@ class GarminProvider(SportProvider):
         stats.calories = int(total_calories)
         stats.ascent_meters = round(ascent, 2)
         stats.max_activity_distance_km = round(max_dist, 2)
-        stats.avg_hr = int(round(sum(hrs) / len(hrs))) if hrs else 0
-        stats.avg_pace_sec_per_km = round(best_pace, 1) if best_pace else 0.0
+        stats.avg_hr = int(round(hr_wsum / hr_w)) if hr_w > 0 else 0
+        stats.avg_pace_sec_per_km = round(pace_wsum / pace_w, 1) if pace_w > 0 else 0.0
         stats.training_load = round(load, 2)
 
     @staticmethod

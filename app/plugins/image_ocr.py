@@ -230,9 +230,12 @@ async def handle_image(bot: Bot, event: MessageEvent):
         # 比对：两侧都有值且相对误差超阈值 → 视觉模型结合 OCR 二次看图给确定值
         conflicts = parsers.find_field_conflicts(ocr_data, vision_data)
         if conflicts:
-            recon = await asyncio.to_thread(
-                llm.vision_reconcile, img_bytes, ocr_data, vision_data, conflicts
-            ) or {}
+            recon = (
+                await asyncio.to_thread(
+                    llm.vision_reconcile, img_bytes, ocr_data, vision_data, conflicts
+                )
+                or {}
+            )
             for k in conflicts:
                 if k in recon:
                     data[k] = recon[k]

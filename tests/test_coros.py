@@ -77,6 +77,33 @@ def test_parse_sport_records_empty():
     }
 
 
+def test_parse_sport_records_uses_average_pace_field():
+    # 配速应以官方「Average Pace」（移动配速）为准，而不是 Duration/Distance（含暂停的 elapsed）。
+    # 这里 elapsed 42:00 / 8km = 5:15，但 Average Pace 是 5:00，应以 5:00（300s）为准。
+    text = (
+        "Duration: 42:00 | Distance: 8.00 km\n"
+        "Average Pace: 5:00 /km | Avg HR: 160 bpm | Calories: 598 kcal\n"
+        "LabelId: 4803 | SportType: 100\n"
+    )
+    r = CorosProvider._parse_sport_records(text)
+    assert r["avg_pace_sec_per_km"] == 300.0  # 5:00，不是 42*60/8=315
+
+
+def test_parse_sport_records_avg_hr_skips_missing():
+    # 一条无心率（缺 Avg HR）的记录不应把平均心率拉低。
+    text = (
+        "Duration: 30:00 | Distance: 5.00 km\n"
+        "Average Pace: 6:00 /km | Avg HR: 150 bpm\n"
+        "LabelId: 1 | SportType: 100\n"
+        "\n"
+        "Duration: 30:00 | Distance: 5.00 km\n"
+        "Average Pace: 6:00 /km\n"  # 无 Avg HR → hr=0
+        "LabelId: 2 | SportType: 100\n"
+    )
+    r = CorosProvider._parse_sport_records(text)
+    assert r["avg_hr"] == 150  # 只按有心率的记录算，不被 0 拉低
+
+
 def test_parse_activity_ascent_outdoor_gain_loss():
     # 户外跑：Elevation Gain / Loss 格式，取 Gain 侧
     text = "Workout Time: 40:00\nDistance: 8.00 km\nElevation Gain / Loss: 6 m / 0 m"
@@ -85,7 +112,9 @@ def test_parse_activity_ascent_outdoor_gain_loss():
 
 def test_parse_activity_ascent_treadmill_total_ascent():
     # 跑步机/室内跑：Total Ascent 格式（坡度估算爬升）
-    text = "Indoor Run Activity Details\nDistance: 15.00 km\nTotal Ascent: 972 m\nCalories: 839 kcal"
+    text = (
+        "Indoor Run Activity Details\nDistance: 15.00 km\nTotal Ascent: 972 m\nCalories: 839 kcal"
+    )
     assert CorosProvider._parse_activity_ascent(text) == 972.0
 
 

@@ -75,9 +75,7 @@ def test_record_manual_activity_accumulates(db_session):
         db_session,
     )
 
-    rec = db_session.execute(
-        select(DailyRecord).where(DailyRecord.member_qq == "111")
-    ).scalar_one()
+    rec = db_session.execute(select(DailyRecord).where(DailyRecord.member_qq == "111")).scalar_one()
     assert rec.distance_km == 8.0
     assert rec.ascent_meters == 70.0
     assert rec.calories == 600
@@ -113,16 +111,14 @@ def test_undo_last_checkin_reverts_last(db_session):
     assert md.week_distance_km == 5.0
 
     rec = db_session.execute(
-        select(DailyRecord).where(
-            DailyRecord.member_qq == "111", DailyRecord.platform == "manual"
-        )
+        select(DailyRecord).where(DailyRecord.member_qq == "111", DailyRecord.platform == "manual")
     ).scalar_one()
     assert rec.distance_km == 5.0
     assert rec.activities_count == 1
 
-    logs = db_session.execute(
-        select(CheckinLog).where(CheckinLog.member_qq == "111")
-    ).scalars().all()
+    logs = (
+        db_session.execute(select(CheckinLog).where(CheckinLog.member_qq == "111")).scalars().all()
+    )
     assert len(logs) == 1
     assert logs[0].distance_km == 5.0
 
@@ -144,9 +140,7 @@ def test_undo_last_checkin_removes_record_when_zero(db_session):
     assert md.total_distance_km == 0.0
 
     rec = db_session.execute(
-        select(DailyRecord).where(
-            DailyRecord.member_qq == "111", DailyRecord.platform == "manual"
-        )
+        select(DailyRecord).where(DailyRecord.member_qq == "111", DailyRecord.platform == "manual")
     ).scalar_one_or_none()
     assert rec is None  # 当日 manual 明细归零后整行删除
 
@@ -183,9 +177,7 @@ def test_undo_checkin_by_id_reverts_specific(db_session):
     assert md.total_distance_km == 9.0  # 5 + 4
 
     rec = db_session.execute(
-        select(DailyRecord).where(
-            DailyRecord.member_qq == "111", DailyRecord.platform == "manual"
-        )
+        select(DailyRecord).where(DailyRecord.member_qq == "111", DailyRecord.platform == "manual")
     ).scalar_one()
     assert rec.distance_km == 9.0
     assert rec.activities_count == 2

@@ -52,15 +52,16 @@ def test_apply_activity_metrics_aggregates_activities():
     assert stats.activities_count == 2
     # 训练负荷只取 activityTrainingLoad 之和，忽略 aerobic/anaerobicTrainingEffect
     assert stats.training_load == 200.0
-    assert stats.avg_hr == 155  # (150 + 160) / 2
+    # 平均心率按时长加权：(150*1800 + 160*3600) / (1800 + 3600) = 157
+    assert stats.avg_hr == 157
+    # 平均配速按距离加权：两条都是 1000/2.78 ≈ 359.7 s/km
+    assert stats.avg_pace_sec_per_km == 359.7
 
 
 def test_apply_activity_metrics_dict_wrapper():
     # garminconnect 某些版本返回 {"activityList": [...]} 包裹结构
     stats = _stats()
-    acts = {
-        "activityList": [_activity("running", distance=3000, duration=900, calories=200)]
-    }
+    acts = {"activityList": [_activity("running", distance=3000, duration=900, calories=200)]}
     GarminProvider._apply_activity_metrics(stats, acts)
     assert stats.distance_km == 3.0
     assert stats.active_minutes == 15

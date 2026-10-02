@@ -491,11 +491,25 @@ class CorosProvider(SportProvider):
 
         total_km = round(sum(r["km"] for r in recs), 2)
         total_dur = sum(r["dur"] for r in recs)
-        # 平均配速 = 总运动时长 / 总距离（距离加权，最贴近「当天整体配速」）
-        avg_pace = round(total_dur / total_km, 1) if total_km > 0 else 0.0
-        # 平均心率 = 按时长加权
-        weighted_hr = sum(r["hr"] * r["dur"] for r in recs)
-        avg_hr = int(round(weighted_hr / total_dur)) if total_dur > 0 else 0
+
+        # 平均配速：优先用每条记录官方给的「Average Pace」字段（移动配速，排除暂停/热身），
+        # 按距离加权；个别记录缺 pace（字段漂移/格式不识别）时才退回「总时长/总距离」折算，
+        # 避免用含暂停的 elapsed 时长直接除距离、把整体配速拉慢。
+        paced = [r for r in recs if r["pace"] > 0 and r["km"] > 0]
+        if paced:
+            avg_pace = round(
+                sum(r["pace"] * r["km"] for r in paced) / sum(r["km"] for r in paced), 1
+            )
+        else:
+            avg_pace = round(total_dur / total_km, 1) if total_km > 0 else 0.0
+
+        # 平均心率：按时长加权，跳过无心率（hr=0，心率带脱落/室内无心率）的记录，
+        # 否则缺心率的记录会把均值往 0 拉低。
+        hrd = [r for r in recs if r["hr"] > 0 and r["dur"] > 0]
+        if hrd:
+            avg_hr = int(round(sum(r["hr"] * r["dur"] for r in hrd) / sum(r["dur"] for r in hrd)))
+        else:
+            avg_hr = 0
 
         return {
             "total_distance_km": total_km,

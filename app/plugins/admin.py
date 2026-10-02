@@ -32,7 +32,9 @@ sync_all_cmd = on_command("同步数据", priority=5, block=True)
 refresh_names_cmd = on_command("刷新昵称", aliases={"修复昵称", "同步昵称"}, priority=5, block=True)
 garmin_bind_cmd = on_command("garmin绑定", aliases={"佳明绑定"}, priority=5, block=True)
 checkin_logs_cmd = on_command("打卡记录", aliases={"截图记录", "打卡明细"}, priority=5, block=True)
-delete_checkin_cmd = on_command("删除打卡记录", aliases={"删除指定打卡", "撤销打卡记录"}, priority=5, block=True)
+delete_checkin_cmd = on_command(
+    "删除打卡记录", aliases={"删除指定打卡", "撤销打卡记录"}, priority=5, block=True
+)
 
 # 管理员查看截图打卡记录时一次最多列出的条数（取最近 N 条，避免刷屏）
 _CHECKIN_LOG_LIMIT = 20
@@ -432,7 +434,9 @@ async def handle_checkin_logs(bot: Bot, event: MessageEvent, args: Message = Com
         await checkin_logs_cmd.finish(f"{name}（QQ {qq}）没有截图打卡记录")
     lines = [f"📋 {name}（QQ {qq}）的截图打卡记录（最近 {len(logs)} 条）", "━━━━━━━━━━━━"]
     for lg in logs:
-        lines.append(f"· #{lg.id}  {lg.record_date.month}月{lg.record_date.day}日  {lg.distance_km:.2f} km")
+        lines.append(
+            f"· #{lg.id}  {lg.record_date.month}月{lg.record_date.day}日  {lg.distance_km:.2f} km"
+        )
     lines.append(f"发「删除打卡记录 {qq} 记录号」删除指定一条")
     await checkin_logs_cmd.finish("\n".join(lines))
 

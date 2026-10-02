@@ -242,9 +242,7 @@ def undo_last_checkin(qq: str, session: Session) -> tuple[float, date | None]:
     return _undo_checkin_log(session, last)
 
 
-def undo_checkin_by_id(
-    qq: str, checkin_log_id: int, session: Session
-) -> tuple[float, date] | None:
+def undo_checkin_by_id(qq: str, checkin_log_id: int, session: Session) -> tuple[float, date] | None:
     """删除某成员**指定 id** 的截图打卡记录（管理员用），返回 (回退距离, 打卡日期)。
 
     记录不存在或不属于该成员时返回 None（不做任何修改）。与 undo_last_checkin 共用
@@ -340,12 +338,15 @@ def sync_history(qq: str, platform: str, start: date, end: date) -> int:
         session.close()
 
 
-def sync_today_all() -> int:
+def sync_today_all(exclude_qq: str | None = None) -> int:
     """同步**所有已绑定成员**的今日数据，返回成功同步的人数。
 
     榜单播报 / 手动「排行」在计算榜单前调用，保证当天数据新鲜——否则绑定 COROS 后
     榜单会因为还没回填到今天而显示空。逐成员调用 sync_daily（各自自开 session），
     单成员失败不影响其它成员。阻塞（网络 + DB），供 asyncio.to_thread 直接执行。
+
+    exclude_qq：传某成员 QQ 时可跳过该成员——「今日」命令已单独 sync_daily 过本人，
+    再全量同步一遍纯属重复拉取，跳过可省一次登录/网络往返。
     """
     global _sync_today_all_at
     _sync_today_all_at = time.time()  # 记录本次全量同步时刻，供节流复用
@@ -361,6 +362,8 @@ def sync_today_all() -> int:
     today = timeutil.today()
     ok = 0
     for qq, platform in targets:
+        if exclude_qq is not None and qq == exclude_qq:
+            continue
         try:
             sync_daily(qq, platform, today)
             ok += 1
@@ -378,12 +381,14 @@ _SYNC_TODAY_ALL_MIN_INTERVAL_SEC = 600.0  # 10 分钟
 
 def sync_today_all_throttled(
     min_interval_sec: float = _SYNC_TODAY_ALL_MIN_INTERVAL_SEC,
+    exclude_qq: str | None = None,
 ) -> int:
     """带节流的全量同步：距上次全量同步不足 min_interval_sec 秒则跳过，返回 0。
 
     供「今日群内第 N 名」等高频名次场景调用，避免每次截图/今日查询都拉全成员平台接口；
     榜单播报与「排行」命令仍走无节流的 sync_today_all 保证最终口径。
+    exclude_qq 透传给 sync_today_all：跳过调用方已单独同步过的本人。
     """
     if time.time() - _sync_today_all_at < min_interval_sec:
         return 0
-    return sync_today_all()
+    return sync_today_all(exclude_qq=exclude_qq)

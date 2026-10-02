@@ -120,9 +120,11 @@ def global_total(session: Session) -> int:
 
 def _checkin_dates(qq: str, session: Session) -> set[date]:
     """该成员所有打卡日期集合（供连续打卡统计复用）。"""
-    rows = session.execute(
-        select(CheckinDay.record_date).where(CheckinDay.member_qq == qq)
-    ).scalars().all()
+    rows = (
+        session.execute(select(CheckinDay.record_date).where(CheckinDay.member_qq == qq))
+        .scalars()
+        .all()
+    )
     return set(rows)
 
 

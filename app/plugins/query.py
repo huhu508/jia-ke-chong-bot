@@ -147,7 +147,7 @@ async def build_today(qq: str, nickname: str, bot=None, gid=None) -> str:
             # 「今日群内第 N 名」需全群当天数据齐全（截图 + 绑定成员同口径），
             # 补齐其它绑定成员（带节流）；失败不阻断查询，名次可能略旧。
             try:
-                await asyncio.to_thread(sync.sync_today_all_throttled)
+                await asyncio.to_thread(sync.sync_today_all_throttled, exclude_qq=member.qq)
             except Exception as e:
                 logger.warning(f"同步全员今日数据失败（今日名次可能不全）: {e}")
             text += f"\n\n{_checkin_badge(qq)}"

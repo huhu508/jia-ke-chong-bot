@@ -148,6 +148,7 @@ def format_stat_lines(d, *, calories_label: str = "活动消耗") -> list[str]:
     顺序参考主流运动 App「用户最关心」：步数 / 距离 / 配速 / 爬升 / 时长 / 消耗 / 心率 / 负荷 /
     单次最长 / 睡眠。口径与 checkin.is_active_day 一致（消耗=运动消耗，非基础代谢）。
     """
+
     def g(k: str):
         v = d.get(k) if isinstance(d, dict) else getattr(d, k, None)
         return v or 0

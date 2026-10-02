@@ -90,15 +90,9 @@ def test_today_distance_rank(db_session):
     db_session.add(Member(qq="222", nickname="乙", platform=""))
     db_session.add(Member(qq="333", nickname="丙", platform=""))
     d = date(2026, 9, 20)
-    db_session.add(
-        DailyRecord(member_qq="111", record_date=d, platform="garmin", distance_km=10.0)
-    )
-    db_session.add(
-        DailyRecord(member_qq="222", record_date=d, platform="manual", distance_km=5.0)
-    )
-    db_session.add(
-        DailyRecord(member_qq="333", record_date=d, platform="manual", distance_km=15.0)
-    )
+    db_session.add(DailyRecord(member_qq="111", record_date=d, platform="garmin", distance_km=10.0))
+    db_session.add(DailyRecord(member_qq="222", record_date=d, platform="manual", distance_km=5.0))
+    db_session.add(DailyRecord(member_qq="333", record_date=d, platform="manual", distance_km=15.0))
     db_session.commit()
     assert today_distance_rank("333", db_session, d=d) == 1
     assert today_distance_rank("111", db_session, d=d) == 2
