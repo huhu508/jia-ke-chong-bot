@@ -5,6 +5,7 @@ from sqlalchemy.orm import Session
 
 from ..config import settings
 from ..db import get_session
+from ..models.checkin_log import CheckinLog
 from ..models.daily_record import DailyRecord
 from . import timeutil
 
@@ -23,6 +24,26 @@ def cleanup_daily(before: date | None = None) -> int:
     session: Session = get_session()
     try:
         result = session.execute(delete(DailyRecord).where(DailyRecord.record_date < before))
+        session.commit()
+        return result.rowcount or 0
+    finally:
+        session.close()
+
+
+def cleanup_checkin_logs(before: date | None = None) -> int:
+    """删除 record_date < before 的截图打卡明细，返回删除行数。
+
+    与 daily_record 共用同一 retention_days 窗口：明细只用于「删除打卡」精确回退，
+    保留与聚合数据同样长的一年已足够——更早的记录 daily_record 也已清理、本就无法回退。
+    retention_days <= 0 表示永久保留、不清理。
+    """
+    if settings.retention_days <= 0:
+        return 0
+    if before is None:
+        before = timeutil.today() - timedelta(days=settings.retention_days)
+    session: Session = get_session()
+    try:
+        result = session.execute(delete(CheckinLog).where(CheckinLog.record_date < before))
         session.commit()
         return result.rowcount or 0
     finally:

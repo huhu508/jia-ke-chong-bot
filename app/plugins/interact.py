@@ -131,6 +131,18 @@ _MAX_TURNS = 6  # 最多保留 6 条（3 轮问答）
 _HISTORY_MAX_CHARS = 200  # 单条历史内容上限，防上下文污染/超长占用内存
 
 
+def _purge_chat() -> None:
+    """惰性清理超过 TTL 的对话上下文。
+
+    否则只聊过一次就不再回来的成员，其条目会永久残留、随群规模无界增长。
+    在「读/写」任一入口顺带清理，频率低（仅 @问答 触发），全量遍历代价可忽略。
+    """
+    now = time.time()
+    for k in [k for k, ts in _CHAT_LAST.items() if now - ts > _CHAT_TTL]:
+        _CHAT_HISTORY.pop(k, None)
+        _CHAT_LAST.pop(k, None)
+
+
 def _chat_history(qq: str, group_id) -> list[dict]:
     key = (group_id, qq)
     now = time.time()
@@ -141,6 +153,7 @@ def _chat_history(qq: str, group_id) -> list[dict]:
 
 
 def _remember(qq: str, group_id, question: str, answer: str) -> None:
+    _purge_chat()
     key = (group_id, qq)
     hist = _CHAT_HISTORY.setdefault(key, [])
     # 只存清洗后的提问与回答，各自截断，避免上下文污染 / 超长占用内存

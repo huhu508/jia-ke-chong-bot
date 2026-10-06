@@ -456,6 +456,26 @@ def classify_intent(text: str) -> dict | None:
     return data
 
 
+_VISION_INT_KEYS = ("steps", "calories", "active_minutes", "avg_hr")
+_VISION_FLOAT_KEYS = ("distance_km", "ascent_meters", "avg_pace_sec_per_km", "sleep_hours")
+
+
+def _normalize_vision_fields(raw: dict) -> dict:
+    """把视觉模型返回的字段规整为数值类型：过滤未知键与 bool（视觉偶发把布尔当真值），
+    int 键先经 float 转整、float 键直接转 float，转不动则跳过该键。"""
+    data: dict = {}
+    for k, v in raw.items():
+        if k not in _VISION_INT_KEYS and k not in _VISION_FLOAT_KEYS:
+            continue
+        if isinstance(v, bool):
+            continue
+        try:
+            data[k] = int(float(v)) if k in _VISION_INT_KEYS else float(v)
+        except (ValueError, TypeError):
+            continue
+    return data
+
+
 def vision_extract(img_bytes: bytes) -> dict | None:
     """用视觉模型兜底识别运动截图，返回结构化运动数据；失败/未配置返回 None。
 
@@ -494,20 +514,7 @@ def vision_extract(img_bytes: bytes) -> dict | None:
     raw = _parse_json_obj(content)
     if not raw:
         return None
-
-    int_keys = ("steps", "calories", "active_minutes", "avg_hr")
-    float_keys = ("distance_km", "ascent_meters", "avg_pace_sec_per_km", "sleep_hours")
-    data: dict = {}
-    for k, v in raw.items():
-        if k not in int_keys and k not in float_keys:
-            continue
-        if isinstance(v, bool):
-            continue
-        try:
-            data[k] = int(float(v)) if k in int_keys else float(v)
-        except (ValueError, TypeError):
-            continue
-    return data
+    return _normalize_vision_fields(raw)
 
 
 def vision_reconcile(
@@ -560,17 +567,4 @@ def vision_reconcile(
     raw = _parse_json_obj(content)
     if not raw:
         return None
-
-    int_keys = ("steps", "calories", "active_minutes", "avg_hr")
-    float_keys = ("distance_km", "ascent_meters", "avg_pace_sec_per_km", "sleep_hours")
-    data: dict = {}
-    for k, v in raw.items():
-        if k not in int_keys and k not in float_keys:
-            continue
-        if isinstance(v, bool):
-            continue
-        try:
-            data[k] = int(float(v)) if k in int_keys else float(v)
-        except (ValueError, TypeError):
-            continue
-    return data
+    return _normalize_vision_fields(raw)

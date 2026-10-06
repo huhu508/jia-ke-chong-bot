@@ -97,7 +97,7 @@ def record_manual_activity(
       - avg_pace/avg_hr 简单以本次覆盖（无更细数据可加权）。
     供每日排行把「未绑定平台、靠截图记录」的成员也纳入统计。
     入参 stats 为统一 DailyStats（调用方从 parsers 结果构造），与平台接口同形。
-    为阻塞调用，需在 asyncio.to_thread 中执行。
+    纯 SQLite 单条写入、极快，直接同步调用即可（勿传入线程，避免跨线程共享 Session）。
     """
     rec = session.execute(
         select(DailyRecord).where(
@@ -124,7 +124,8 @@ def record_manual_activity(
         rec.avg_hr = stats.avg_hr
     rec.activities_count = (rec.activities_count or 0) + 1
     checkin.ensure_day(member.qq, d, session)
-    session.commit()
+    # 只 flush 不 commit，理由同 add_manual_distance：截图写库路径单事务。
+    session.flush()
     return rec
 
 
@@ -138,7 +139,10 @@ def log_checkin(
     calories: int = 0,
     active_minutes: int = 0,
 ) -> None:
-    """记录一次截图打卡的明细（供「删除最近一次打卡」精确回退）。"""
+    """记录一次截图打卡的明细（供「删除最近一次打卡」精确回退）。
+
+    只 flush 不 commit，理由同 add_manual_distance：截图写库路径单事务。
+    """
     session.add(
         CheckinLog(
             member_qq=qq,
@@ -149,7 +153,7 @@ def log_checkin(
             active_minutes=active_minutes,
         )
     )
-    session.commit()
+    session.flush()
 
 
 def _undo_checkin_log(session: Session, log: CheckinLog) -> tuple[float, date]:
@@ -261,7 +265,7 @@ def add_manual_distance(member: Member, distance_km: float, session: Session) ->
       - total_distance_km：历史总累计（供「今日」展示）；
       - week_distance_km：本周累计（供周排行），跨周自动清零重计。
     未绑定平台的成员通过截图手动记录时使用；只存距离和，不留明细。
-    为阻塞调用，需在 asyncio.to_thread 中执行。
+    纯 SQLite 单条写入、极快，直接同步调用即可（勿传入线程，避免跨线程共享 Session）。
     """
     rec = session.get(ManualDistance, member.qq)
     if rec is None:
@@ -277,7 +281,9 @@ def add_manual_distance(member: Member, distance_km: float, session: Session) ->
 
     rec.total_distance_km = round(rec.total_distance_km + distance_km, 2)
     rec.week_distance_km = round(rec.week_distance_km + distance_km, 2)
-    session.commit()
+    # 只 flush 不 commit：与截图写库路径其它步骤同属一个事务，由调用方最后统一 commit，
+    # 避免中间某步失败造成「前半已落库、去重未标记 → 重发重复累计」。
+    session.flush()
     return rec.total_distance_km
 
 

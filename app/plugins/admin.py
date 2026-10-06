@@ -52,6 +52,17 @@ BACKFILL_DAYS = 31
 _PRIVATE_RETRIES = 3
 _PRIVATE_RETRY_DELAY = 1.0
 
+# 后台任务强引用集合：create_task 返回值若不被持有，任务可能在执行中途被 GC（asyncio 官方
+# 已知坑），且未来若抛出未捕获异常会变「Task exception was never retrieved」。统一持有并
+# 在完成时自动移除。
+_BG_TASKS: set[asyncio.Task] = set()
+
+
+def _spawn(coro) -> None:
+    task = asyncio.create_task(coro)
+    _BG_TASKS.add(task)
+    task.add_done_callback(_BG_TASKS.discard)
+
 
 async def _backfill_async(qqs: list[str] | None = None) -> None:
     """后台回填平台历史数据（默认全部已绑定成员，或指定 qq 列表）。
@@ -224,7 +235,7 @@ async def handle_garmin_bind(bot: Bot, event: MessageEvent, args: Message = Comm
     finally:
         session.close()
 
-    asyncio.create_task(_backfill_async([qq]))
+    _spawn(_backfill_async([qq]))
     await garmin_bind_cmd.finish(
         f"佳明绑定成功 ✅\n已绑定账号：{email}\n"
         "之前的截图里程已由佳明数据取代，正在后台同步你的历史数据，稍后发「今日」即可查询"
@@ -270,7 +281,7 @@ async def handle_confirm(bot: Bot, event: MessageEvent):
         session.close()
 
     # 后台回填历史数据，供周榜/月榜（不阻塞绑定确认）
-    asyncio.create_task(_backfill_async([qq]))
+    _spawn(_backfill_async([qq]))
     await confirm_cmd.finish(
         "COROS 授权成功，已绑定 ✅ 之前的截图里程已由高驰数据取代，"
         "正在后台同步你的历史数据，稍后发「今日」即可查询"
@@ -347,7 +358,7 @@ async def handle_sync_all(bot: Bot, event: MessageEvent):
         await sync_all_cmd.finish("还没有任何成员绑定平台")
 
     # 后台回填（逐日拉平台历史），避免长时间阻塞命令响应
-    asyncio.create_task(_backfill_async())
+    _spawn(_backfill_async())
     await sync_all_cmd.finish(
         f"已开始后台同步 {len(members)} 人的历史数据（近 {BACKFILL_DAYS} 天），"
         "完成后发「排行 / 周榜 / 月榜」即可看到正确数据"

@@ -50,6 +50,10 @@ async def _run_broadcast() -> None:
         await asyncio.to_thread(retention.cleanup_daily)
     except Exception as e:
         logger.warning(f"清理过期明细失败（不影响播报）: {e}")
+    try:
+        await asyncio.to_thread(retention.cleanup_checkin_logs)
+    except Exception as e:
+        logger.warning(f"清理过期打卡明细失败（不影响播报）: {e}")
 
     # 播报前先同步所有已绑定成员的今日数据，否则绑定平台后榜单可能因当天未入库而为空
     try:
@@ -169,6 +173,8 @@ async def _daily_broadcast_loop() -> None:
 
 
 _started = False
+# 持有播报循环任务的强引用，避免常驻协程被 GC 回收导致每日播报静默失效
+_broadcast_task: asyncio.Task | None = None
 
 
 def start_scheduler() -> None:
@@ -176,12 +182,12 @@ def start_scheduler() -> None:
 
     幂等：若 on_startup 被重复触发，也只创建一次循环任务，避免每天 23:00 重复播报。
     """
-    global _started
+    global _started, _broadcast_task
     if _started:
         logger.warning("调度器已启动，跳过重复启动")
         return
     _started = True
-    asyncio.get_running_loop().create_task(_daily_broadcast_loop())
+    _broadcast_task = asyncio.get_running_loop().create_task(_daily_broadcast_loop())
     logger.info(
         f"每日排行播报已启动（每天 {settings.broadcast_hour:02d}:{settings.broadcast_minute:02d}）"
     )

@@ -35,6 +35,25 @@ image_matcher = on_message(priority=10, block=False, rule=Rule(_has_image))
 
 # 保存收到的图片，便于排查 OCR 识别误差
 IMG_DIR = Path("data/images")
+# 只保留最近 N 张原始截图，避免排查用图片长期累积占满磁盘
+_IMG_KEEP = 500
+
+
+def _cleanup_images(keep: int = _IMG_KEEP) -> None:
+    """只保留最近 keep 张原始截图，删除更早的（按 mtime）。"""
+    try:
+        files = sorted(
+            IMG_DIR.glob("*.jpg"),
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        )
+    except Exception:
+        return
+    for f in files[keep:]:
+        try:
+            f.unlink(missing_ok=True)
+        except Exception as e:
+            logger.warning(f"清理旧截图失败 {f}: {e}")
 
 
 async def _download(bot: Bot, seg) -> bytes:
@@ -191,6 +210,7 @@ async def handle_image(bot: Bot, event: MessageEvent):
     try:
         IMG_DIR.mkdir(parents=True, exist_ok=True)
         (IMG_DIR / f"{time.strftime('%Y%m%d_%H%M%S')}_{qq}.jpg").write_bytes(img_bytes)
+        _cleanup_images()
     except Exception as e:
         logger.warning(f"保存图片失败: {e}")
 
@@ -332,7 +352,6 @@ async def handle_image(bot: Bot, event: MessageEvent):
     session = get_session()
     try:
         member = get_or_create_member(session, qq, name)
-        session.commit()
         total = sync.add_manual_distance(member, data["distance_km"], session)
         # 截图记录也进当日明细，让未绑定成员出现在每日排行里。
         # parsers 返回 dict，统一转成 DailyStats（过滤非模型字段，防御未来新增键）。

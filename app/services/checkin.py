@@ -15,6 +15,7 @@ from collections import Counter
 from datetime import date, timedelta
 
 from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from ..config import settings
@@ -66,6 +67,9 @@ def ensure_day(qq: str, d: date, session: Session) -> bool:
     """记录一个打卡日（幂等）。d 早于计数起点时不记录。返回是否新增。
 
     不自行 commit——复用调用方的 session，随其 commit 落库（与 sync 写库路径一致）。
+    用 savepoint 提前 flush 捕获 (member_qq, record_date) 唯一约束冲突：后台回填历史与
+    用户查询并发落库时可能同时 select 到 None，后提交的一方在此返回 False（视为已存在），
+    且只回滚本次 add，不影响调用方其它 pending 改动。
     """
     if d < counting_start():
         return False
@@ -74,7 +78,13 @@ def ensure_day(qq: str, d: date, session: Session) -> bool:
     ).scalar_one_or_none()
     if exists is not None:
         return False
-    session.add(CheckinDay(member_qq=qq, record_date=d))
+    try:
+        with session.begin_nested():
+            session.add(CheckinDay(member_qq=qq, record_date=d))
+            session.flush()
+    except IntegrityError:
+        # 并发下别人已抢先插入：savepoint 回滚只撤销本次 add，返回「已存在」
+        return False
     return True
 
 
