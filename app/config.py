@@ -17,8 +17,8 @@ class Settings(BaseSettings):
     # 显式指定播报群号列表（JSON 数组）；留空 = 自动播报到机器人出现过的所有群
     broadcast_groups: list[int] = []
     # 群使用白名单（群号列表）：仅这些群的成员可触发命令 / 被每日播报。
-    # 默认放行「甲壳虫跑团」与「test 群聊」；留空 = 不限制（全群可用）。
-    allowed_groups: list[int] = [595366460, 1062117913]
+    # 留空 = 不限制（全群可用）。需要限制时在 .env 用 ALLOWED_GROUPS 填写（JSON 数组）。
+    allowed_groups: list[int] = []
 
     # 打卡计数起点（本学期开学日，YYYY-MM-DD）：此日期之前的记录不统计打卡天数。
     semester_start: str = "2026-09-20"

@@ -108,7 +108,8 @@ NapCat 负责登录 QQ 并通过反向 WebSocket 把消息推给机器人：
 在 `.env` 填 `LLM_API_KEY`（模型 `agnes-3.0-flash`）即可启用。设计上 LLM **只进增强层、不进核心数据链路**：
 
 - OCR 识别、数据解析、排行聚合、平台同步全部走确定性代码；
-- 只把「聚合后的数字」发给模型，不发送原始消息 / 截图 / 账号密码；
+- 文本类能力（总结 / 鼓励 / 建议 / 问答 / 点评）只把「聚合后的数字」发给模型，不发送原始消息 / 账号密码；
+- 截图识图默认走本地 OCR；仅当 OCR 读不出核心字段（距离）时，才可能把截图发给视觉模型兜底（`LLM_VISION_ENABLED=false` 可彻底关闭，截图绝不上传云端）；
 - 未配 key 或调用失败一律降级到模板文案，机器人照常可用。
 
 底层走 OpenAI 兼容接口，改 `LLM_BASE_URL` + `LLM_MODEL` 即可换成任意 OpenAI 兼容服务。
@@ -215,7 +216,7 @@ NapCat 负责登录 QQ 并通过反向 WebSocket 把消息推给机器人：
 | 变量 | 默认 | 说明 |
 |---|---|---|
 | `HOST` / `PORT` | `127.0.0.1` / `8080` | 反向 WebSocket 监听地址 |
-| `SUPERUSERS` | `["10001"]` | 管理员 QQ 号（JSON 数组） |
+| `SUPERUSERS` | `["10001", "10002"]` | 管理员 QQ 号（JSON 数组，填你自己的） |
 | `COMMAND_START` | `["", "/"]` | 命令前缀 |
 | `DB_URL` | `sqlite:///data/bot.db` | 数据库连接 |
 | `BROADCAST_HOUR/MINUTE` | `23` / `0` | 每日排行播报时间 |
@@ -228,14 +229,14 @@ NapCat 负责登录 QQ 并通过反向 WebSocket 把消息推给机器人：
 | `LLM_API_KEY` | （空） | Agnes AI key，留空自动禁用 AI 增强 |
 | `LLM_MODEL` | `agnes-3.0-flash` | 大模型名（OpenAI 兼容） |
 | `LLM_BASE_URL` | `https://apihub.agnes-ai.com/v1/chat/completions` | 大模型接口地址（OpenAI 兼容） |
-| `LLM_VISION_ENABLED` | `true` | 识图兜底开关：`false` = 只用本地 OCR，截图绝不上传云端 |
+| `LLM_VISION_ENABLED` | `true` | 识图兜底开关：本地 OCR 读不出距离时才把截图发给视觉模型；`false` = 只用本地 OCR，截图绝不上传云端 |
 
 ## 数据与隐私
 
 - 全部数据存于本机 `data/`（SQLite 数据库、成员凭据、收到的截图），不经过任何第三方服务器（AI 增强层除外，且只发送聚合后的数字）。
 - 成员账号凭据按 QQ 号隔离存于 `data/accounts/`，且只在私聊中收集，绝不出现在群里；落盘前经 Fernet 加密。
 - **⚠️ 密钥备份（重要）**：`data/secret.key` 是 Fernet 对称密钥，所有已加密凭据都依赖它解密。请把 `data/secret.key` 与 `data/` **一起备份**——一旦密钥文件丢失、损坏或被误删，所有已加密的账号凭据将**永久无法解密**（无法找回），成员会表现为「未绑定」，只能重新绑定各自的 Garmin / COROS 账号。
-- OCR 用本地 RapidOCR，图片不离开本机；发给 LLM 的只有聚合后的数字。
+- OCR 用本地 RapidOCR，默认图片不离开本机；仅当本地 OCR 读不出距离、且 `LLM_VISION_ENABLED=true` 时，才把截图发给视觉模型兜底识别。
 - `.env`、`data/` 已加入 `.gitignore`，不会随代码提交到仓库。**请勿将你的 `.env` 或 `data/` 上传到任何公开位置。**
 
 ## 部署到常开主机

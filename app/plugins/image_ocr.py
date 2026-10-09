@@ -19,7 +19,7 @@ from PIL import Image, ImageOps
 
 from ..db import get_session
 from ..models.member import Member
-from ..services import checkin, cheers, llm, parsers, ranking, sync, timeutil
+from ..services import checkin, cheers, llm, net, parsers, ranking, sync, timeutil
 from ..services.member import get_or_create_member
 from ..services.ocr import recognize_boxes
 from ..services.providers.base import DailyStats
@@ -59,8 +59,8 @@ def _cleanup_images(keep: int = _IMG_KEEP) -> None:
 async def _download(bot: Bot, seg) -> bytes:
     """下载图片字节。优先 get_image API，其次直接下载 url。
 
-    注意：这里 httpx 用 verify=False——QQ/NapCat 图片 url 常是内网地址或自签证书，
-    关闭 TLS 校验只影响「读图」这一件事，不涉及任何凭据，风险可接受。
+    TLS 校验按地址区分：内网/本机地址（NapCat 自签/HTTP）降级不校验，
+    公网地址保持校验，避免中间人替换图片内容。
     """
     file = seg.data.get("file", "")
     url = seg.data.get("url", "")
@@ -74,14 +74,14 @@ async def _download(bot: Bot, seg) -> bytes:
                 return Path(f).read_bytes()
             u = res.get("url")
             if u:
-                async with httpx.AsyncClient(timeout=30, verify=False) as c:
+                async with httpx.AsyncClient(timeout=30, verify=net.verify_tls(u)) as c:
                     r = await c.get(u)
                     r.raise_for_status()
                     return r.content
     except Exception as e:
         logger.warning(f"get_image 失败，尝试直接下载 url: {e}")
     if url:
-        async with httpx.AsyncClient(timeout=30, verify=False) as c:
+        async with httpx.AsyncClient(timeout=30, verify=net.verify_tls(url)) as c:
             r = await c.get(url)
             r.raise_for_status()
             return r.content
@@ -206,6 +206,24 @@ async def handle_image(bot: Bot, event: MessageEvent):
     img_md5 = hashlib.md5(img_bytes).hexdigest()
     img_dhash = _dhash(img_bytes)
 
+    # 重复打卡去重：同一张图（含群内转发）已成功记过，直接跳过。前置到 OCR/视觉之前，
+    # 既防重复累计，也避免重复截图反复消耗本地 OCR 与视觉调用（不再上传/识别第二遍）。
+    if _is_duplicate(img_md5, img_dhash):
+        logger.info(f"[图片识别] qq={qq} 检测到重复截图，跳过识别")
+        await image_matcher.finish("⏳ 这张截图刚才已经记过啦，本次不重复累计")
+
+    # 提前读取绑定状态：已绑定平台的成员，数据以平台接口为准，截图仅作回显，
+    # 无需（也不应）为一句「以 App 为准」把截图发给视觉模型兜底。这里先查一次，
+    # 供下方「跳过 vision 上传」与「已绑定只回显不写库」两处共用，避免重复开 session。
+    session = get_session()
+    try:
+        member = session.get(Member, qq)
+        bound = member is not None and bool(member.platform)
+        if member is not None:
+            name = member.display_name
+    finally:
+        session.close()
+
     # 保存原始图片，便于排查 OCR 识别误差
     try:
         IMG_DIR.mkdir(parents=True, exist_ok=True)
@@ -214,24 +232,12 @@ async def handle_image(bot: Bot, event: MessageEvent):
     except Exception as e:
         logger.warning(f"保存图片失败: {e}")
 
-    # 并行识别：本地 OCR 与视觉模型同时跑（各自放线程池，互不阻塞），
-    # 拿到两套结果后逐字段比对，有分歧时视觉模型结合 OCR 结果二次看图给确定值。
-    async def _run_ocr():
-        try:
-            return await asyncio.to_thread(recognize_boxes, img_bytes)
-        except Exception as e:
-            logger.warning(f"[图片识别] qq={qq} OCR 识别失败: {e}")
-            return []
-
-    async def _run_vision():
-        # llm_vision_enabled 关闭 / 无 key 时 vision_extract 直接返回 None，截图不出本机
-        try:
-            return await asyncio.to_thread(llm.vision_extract, img_bytes) or {}
-        except Exception as e:
-            logger.warning(f"[图片识别] qq={qq} 视觉识别失败: {e}")
-            return {}
-
-    result, vision_data = await asyncio.gather(_run_ocr(), _run_vision())
+    # 本地 OCR 识别（主路径，数据不出本机）。
+    try:
+        result = await asyncio.to_thread(recognize_boxes, img_bytes)
+    except Exception as e:
+        logger.warning(f"[图片识别] qq={qq} OCR 识别失败: {e}")
+        result = []
 
     # 解析兜底：解析器异常不应拖垮整条 handler，静默跳过即可
     try:
@@ -241,8 +247,21 @@ async def handle_image(bot: Bot, event: MessageEvent):
         if not ocr_data:
             ocr_data = parsers.parse_activity(text)
 
-        # 合并：以本地 OCR 为准，缺失/0 的字段用视觉结果补齐
         data = dict(ocr_data)
+
+        # 视觉模型仅在本地 OCR 识别不出核心字段（距离）时才兜底，绝不无条件上传每张截图：
+        # 落实「截图不出本机」的对外承诺，也避免无效/重复截图反复消耗视觉调用。
+        # 已绑定成员（数据以 App 为准）连兜底也不触发——为一句回显上传截图不值得。
+        # llm_vision_enabled 关闭 / 无 key 时 vision_extract 直接返回 None（截图不出本机）。
+        vision_data: dict = {}
+        if "distance_km" not in ocr_data and not bound:
+            try:
+                vision_data = await asyncio.to_thread(llm.vision_extract, img_bytes) or {}
+            except Exception as e:
+                logger.warning(f"[图片识别] qq={qq} 视觉识别失败: {e}")
+                vision_data = {}
+
+        # 合并：以本地 OCR 为准，缺失/0 的字段用视觉结果补齐
         for k, v in vision_data.items():
             if k not in data or not data.get(k):
                 data[k] = v
@@ -260,7 +279,7 @@ async def handle_image(bot: Bot, event: MessageEvent):
                 if k in recon:
                     data[k] = recon[k]
             logger.info(
-                f"[图片识别] qq={qq} 并行比对分歧 {conflicts}："
+                f"[图片识别] qq={qq} 识别比对分歧 {conflicts}："
                 f"OCR={ {k: ocr_data.get(k) for k in conflicts} }，"
                 f"视觉={ {k: vision_data.get(k) for k in conflicts} }，复核={recon}"
             )
@@ -308,15 +327,7 @@ async def handle_image(bot: Bot, event: MessageEvent):
 
     # 已绑定平台 → 只展示不写库（数据已由平台接口自动同步）；
     # 未绑定平台 → 累加累计里程 + 写当日明细（供排行，含爬升/配速等）。
-    session = get_session()
-    try:
-        member = session.get(Member, qq)
-        bound = member is not None and bool(member.platform)
-        if member is not None:
-            name = member.display_name
-    finally:
-        session.close()
-
+    # bound / name 已在 OCR 之前读取（见上），此处直接复用。
     if bound:
         # 已绑定平台：截图仅回显不写库（数据已由平台接口自动同步），并明确告知
         # 「以 App 为准」，避免用户误以为截图又被记了一次、结果「今日」却没变化。
@@ -326,12 +337,6 @@ async def handle_image(bot: Bot, event: MessageEvent):
         )
     if "distance_km" not in data:
         await image_matcher.finish(_format_cheer(data))
-
-    # 重复打卡去重：同一张图（含群内转发）已记过，全部字段不重复累计
-    if _is_duplicate(img_md5, img_dhash):
-        await image_matcher.finish(
-            _format_cheer(data) + "\n\n⏳ 这张截图刚才已经记过啦，本次不重复累计"
-        )
 
     # 「今日群内第 N 名」需全群当天数据齐全：先同步已绑定成员的今日数据（带节流，
     # 10 分钟内复用上次结果），让截图成员的名次与绑定成员同口径——否则会漏掉今天

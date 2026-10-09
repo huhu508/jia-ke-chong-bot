@@ -7,7 +7,7 @@ from .base import Base
 
 
 class DailyRecord(Base):
-    """每日运动数据快照（原始明细）。保留近 RETENTION_DAYS（45）天供周榜/月榜聚合，过期由 retention 清理。"""
+    """每日运动数据快照（原始明细）。保留近 RETENTION_DAYS 天（默认 365）供周榜/月榜聚合，过期由 retention 清理。"""
 
     __tablename__ = "daily_record"
     __table_args__ = (

@@ -523,7 +523,7 @@ def vision_reconcile(
     vision_data: dict,
     conflicts: list[str],
 ) -> dict | None:
-    """并行识别有分歧时，把「OCR 结果 + 视觉首轮结果」一起喂给视觉模型二次看图，返回确定值。
+    """OCR 与视觉识别有分歧时，把「OCR 结果 + 视觉首轮结果」一起喂给视觉模型二次看图，返回确定值。
 
     只对 conflicts 列出的字段要求复核，其余字段不动。失败/未配置返回 None，由调用方
     回落保留 OCR 值（OCR 确定性优先）。与 vision_extract 同受 llm_vision_enabled 闸门，

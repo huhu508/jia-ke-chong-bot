@@ -20,6 +20,8 @@ def get_provider(name: str) -> SportProvider:
     if name not in _PROVIDERS:
         raise KeyError(f"未知平台: {name}，可选: {', '.join(VALID_PLATFORMS)}")
     provider = _PROVIDERS[name]
+    # 当前 Garmin/COROS 均为「每用户凭据」，configured 恒为 True；此分支是为将来可能出现
+    # 「需 .env 预配凭据」的平台预留的兜底，并非死代码。
     if not provider.configured:
         raise RuntimeError(f"平台 {name} 尚未配置凭据，请先在 .env 中填写")
     return provider
