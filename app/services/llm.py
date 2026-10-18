@@ -246,7 +246,7 @@ def summarize_sport(name: str, period: str, s: dict) -> str | None:
         f"总距离 {s.get('distance_km', 0)} km，爬升 {s.get('ascent_meters', 0)} m，"
         f"总时长 {s.get('active_minutes', 0)} 分钟，消耗 {s.get('calories', 0)} 千卡，"
         f"平均配速 {pace}/km，平均心率 {s.get('avg_hr', 0)} bpm，"
-        f"运动负荷 {s.get('training_load', 0)}，单次最长 {s.get('max_activity_distance_km', 0)} km。"
+        f"运动负荷 {s.get('training_load', 0)}。"
     )
     return _chat(
         [
@@ -264,7 +264,7 @@ def _sport_facts(name: str, s: dict) -> str:
         f"距离 {s.get('distance_km', 0)} km，爬升 {s.get('ascent_meters', 0)} m，"
         f"时长 {s.get('active_minutes', 0)} 分钟，消耗 {s.get('calories', 0)} 千卡，"
         f"平均配速 {pace}/km，平均心率 {s.get('avg_hr', 0)} bpm，"
-        f"负荷 {s.get('training_load', 0)}，单次最长 {s.get('max_activity_distance_km', 0)} km"
+        f"负荷 {s.get('training_load', 0)}"
     )
 
 

@@ -6,6 +6,7 @@ from app.services.parsers import (
     parse_activity,
     parse_activity_from_boxes,
     sanitize_activity,
+    suspicious_signals,
 )
 
 
@@ -261,3 +262,140 @@ def test_sanitize_calories_without_distance_kept():
     cleaned, reject = sanitize_activity({"calories": 300})
     assert reject is None
     assert cleaned["calories"] == 300
+
+
+def test_suspicious_signals_clean():
+    # 正常运动数据：速度与每公里消耗都在合理区间 → 无可疑信号
+    assert suspicious_signals({"distance_km": 6.23, "active_minutes": 40, "calories": 420}) == []
+
+
+def test_suspicious_signals_impossible_speed():
+    # 5.20 km 被 OCR 读成 52.0 km、时长 40 分钟 → 78 km/h 超限，命中可疑
+    reasons = suspicious_signals({"distance_km": 52.0, "active_minutes": 40})
+    assert reasons and "km/h" in reasons[0]
+
+
+def test_suspicious_signals_absurd_calories_per_km():
+    # 6.23 km 只消耗 1 千卡（食物等效误读）→ 命中可疑
+    reasons = suspicious_signals({"distance_km": 6.23, "calories": 1})
+    assert reasons and "千卡" in reasons[0]
+
+
+def test_suspicious_signals_requires_distance():
+    # 没有距离、或距离为 0 时不属于可疑判定范围（走「缺失补齐」逻辑）
+    assert suspicious_signals({}) == []
+    assert suspicious_signals({"distance_km": 0, "active_minutes": 30}) == []
+    assert suspicious_signals({"steps": 8000, "calories": 300}) == []
+
+
+def test_parse_boxes_duration_datetime_box_ignored():
+    # 「时长」标签旁的日期时间串（选课系统「2026-09-0810:00:00」）不应被读成运动时长：
+    # 紧贴式靠 `(?<![\d午])(\d{1,2})` 挡住，带空格式靠日期上下文守卫挡住。
+    result = [
+        (_box(100.0, 200.0), "时长", 0.99),
+        (_box(300.0, 200.0, w=160), "2026-09-0810:00:00", 0.99),
+        (_box(300.0, 260.0, w=160), "2026-09-08 10:00:00", 0.99),
+    ]
+    data = parse_activity_from_boxes(result)
+    assert "active_minutes" not in data
+
+
+def test_parse_boxes_duration_mm_ss_ok():
+    # lookbehind/`\d{1,2}` 收紧后，「40:16」分:秒格式仍要正常解析（防回归误伤）
+    result = [
+        (_box(100.0, 200.0), "时长", 0.99),
+        (_box(260.0, 200.0), "40:16", 0.99),
+    ]
+    data = parse_activity_from_boxes(result)
+    assert data["active_minutes"] == 40
+
+
+def test_parse_boxes_qq_number_not_distance():
+    # 「里程已由…取代」旁边的 QQ 号「1213513439」不应被空间关联成距离；
+    # 过滤后同窗口的真值框「5.02」应胜出。
+    result = [
+        (_box(100.0, 200.0), "里程", 0.99),
+        (_box(260.0, 200.0, w=90), "1213513439", 0.99),
+    ]
+    assert "distance_km" not in parse_activity_from_boxes(result)
+
+    result.append((_box(360.0, 200.0, w=60), "5.02", 0.99))
+    assert parse_activity_from_boxes(result)["distance_km"] == 5.02
+
+
+def test_parse_boxes_absurd_duration_candidate_excluded():
+    # 48600 分钟（日期串误读）超出候选区间 → 不当作时长
+    result = [
+        (_box(100.0, 200.0), "时长", 0.99),
+        (_box(260.0, 200.0), "48600", 0.99),
+    ]
+    assert "active_minutes" not in parse_activity_from_boxes(result)
+
+
+def test_parse_boxes_absurd_calories_candidate_excluded():
+    # QQ 号级离谱值不当作消耗
+    result = [
+        (_box(100.0, 200.0), "消耗", 0.99),
+        (_box(260.0, 200.0, w=90), "1213513439", 0.99),
+    ]
+    assert "calories" not in parse_activity_from_boxes(result)
+
+
+def test_parse_boxes_pace_garmin_slash_kilometer():
+    # Garmin 中文界面「5:23/公里」合并框：单位表补「/公里」后应解析出配速
+    result = [
+        (_box(200.0, 200.0, w=80), "5:23/公里", 0.99),
+    ]
+    data = parse_activity_from_boxes(result)
+    assert data["avg_pace_sec_per_km"] == 323
+
+
+def test_parse_text_datetime_not_duration():
+    # 文本兜底同样不能把日期时间读成时长
+    assert "active_minutes" not in parse_activity("时间 2026-09-0810:00:00")
+    assert parse_activity("运动时间 40:16")["active_minutes"] == 40
+
+
+def test_parse_text_absurd_distance_dropped():
+    # 文本兜底读到 QQ 号级距离 → 丢弃该字段（交给「距离缺失 → 视觉兜底」路径）
+    assert "distance_km" not in parse_activity("距离 1213513439")
+
+
+def test_detect_list_page_three_run_entries_kilometers():
+    # 三条运动条目的列表页（历史上被记成单次 0.43 km 的失败案例）→ summary
+    text = (
+        "户外跑步 9/20 22:28 0.43 公里\n"
+        "户外跑步 9/20 22:17 1.68 公里\n"
+        "户外跑步 9/20 22:08 1.95 公里"
+    )
+    assert detect_page_kind(text) == "summary"
+
+
+def test_detect_list_page_datetime_entries():
+    # 两条「M/D H:MM」式条目时间 → summary
+    text = "9月18日 07:30 户外跑步\n09-18 07:30 室内骑行"
+    assert detect_page_kind(text) == "summary"
+
+
+def test_detect_home_page_today_activity():
+    # Garmin 首页「今日活动 5.57公里」不应当作单次运动记录
+    text = "今日活动\n杭州市跑步\n5.57公里\n30:01·5:23/公里\n重点关注\n睡眠分数 88"
+    assert detect_page_kind(text) == "summary"
+
+
+def test_detect_activity_detail_single_run_stays_activity():
+    # 运动词/公里/日期信号放宽后，单条详情页仍要判 activity（防误伤）
+    text = "户外跑步\n距离 5.02 公里\n时长 00:35:21"
+    assert detect_page_kind(text) == "activity"
+
+
+def test_suspicious_signals_long_distance_without_duration():
+    # 距离大却无时长佐证：疑似小数位错读放大 10 倍（5.02 → 50.2），值得视觉复核
+    reasons = suspicious_signals({"distance_km": 50.2})
+    assert reasons and "时长" in reasons[0]
+    # 小距离无时长不判可疑；有时长则走速度交叉校验（10 km/h 不超限）
+    assert suspicious_signals({"distance_km": 5.02}) == []
+    assert suspicious_signals({"distance_km": 50.2, "active_minutes": 300}) == []
+    # 边界：24.9 无信号 / 25.0 有信号
+    assert suspicious_signals({"distance_km": 24.9}) == []
+    assert suspicious_signals({"distance_km": 25.0}) != []

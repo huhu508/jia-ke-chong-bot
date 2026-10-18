@@ -1,9 +1,12 @@
-"""运动排行：把 daily_record 按时间范围聚合成三榜（日榜/周榜/月榜共用）。
+"""运动排行：把 daily_record 按时间范围聚合成两榜（日榜/周榜/月榜共用），月榜追加运动天数。
 
-三榜口径：
+榜单口径：
   - 运动距离榜：范围内所有记录的距离之和；
   - 爬升榜：范围内所有记录的爬升之和；
-  - 单次运动距离榜：范围内单条记录的最大距离。
+  - 运动天数榜（仅月榜）：范围内有运动数据的天数。
+
+单次运动最长距离（max_activity_distance_km）只在截图打卡落库时读取一次，
+任何榜单不再排行此类数据。
 
 未绑定平台、靠截图记录（platform="manual"）的成员也纳入统计。
 """
@@ -32,9 +35,9 @@ def compute_range_rankings(
     top_n: int = _TOP_N,
     scope: str = "day",
 ) -> dict:
-    """聚合 [start, end) 区间的 daily_record，返回三榜。
+    """聚合 [start, end) 区间的 daily_record，返回两榜（+ 运动天数）。
 
-    形如 {distance: [(昵称, 值), ...], ascent: [...], max_single: [...]}。
+    形如 {distance: [(昵称, 值), ...], ascent: [...], active_days: [...]}。
 
     scope 取值（决定未绑定成员的距离榜数据源）：
       - "day"：日榜，聚合所有 daily_record（含截图 manual 明细）；
@@ -54,7 +57,6 @@ def compute_range_rankings(
 
         distance = defaultdict(float)
         ascent = defaultdict(float)
-        max_single = defaultdict(float)
         active_days: dict[str, set] = defaultdict(set)
         nicknames: dict[str, str] = {}
 
@@ -63,7 +65,6 @@ def compute_range_rankings(
             nicknames.setdefault(qq, member.display_name if member else qq)
             distance[qq] += rec.distance_km or 0.0
             ascent[qq] += rec.ascent_meters or 0.0
-            max_single[qq] = max(max_single[qq], rec.max_activity_distance_km or 0.0)
             # 运动天数：同一天只要「有数据」就记 1 天（口径同 is_active_day），用 set 按日期去重
             if is_active_day(rec.distance_km, rec.active_minutes, rec.calories):
                 active_days[qq].add(rec.record_date)
@@ -98,7 +99,6 @@ def compute_range_rankings(
         return {
             "distance": _rank(distance),
             "ascent": _rank(ascent),
-            "max_single": _rank(max_single),
             "active_days": _rank({qq: len(ds) for qq, ds in active_days.items()}),
         }
     finally:
@@ -148,7 +148,7 @@ def monthly_title(d: date) -> str:
 
 
 def format_leaderboards(rankings: dict, title: str, with_active_days: bool = False) -> str:
-    """把三榜渲染为消息文本；title 为完整标题（如「🏆 今日运动排行（9月17日）」）。
+    """把榜单渲染为消息文本（距离/爬升两榜）；title 为完整标题（如「🏆 今日运动排行（9月17日）」）。
 
     with_active_days=True 时末尾追加「运动天数排行」（仅月榜有意义——日榜天数退化为 0/1，
     周榜最多 7，均无排行价值）。
@@ -157,8 +157,7 @@ def format_leaderboards(rankings: dict, title: str, with_active_days: bool = Fal
         f"{title}\n",
         "━━━━━━━━━━━━\n",
         f"📏 运动距离排行\n{_fmt_rank(rankings.get('distance', []), 'km', '{:.2f}')}\n\n",
-        f"⛰️ 爬升排行\n{_fmt_rank(rankings.get('ascent', []), 'm', '{:.0f}')}\n\n",
-        f"🚀 单次运动距离排行\n{_fmt_rank(rankings.get('max_single', []), 'km', '{:.2f}')}",
+        f"⛰️ 爬升排行\n{_fmt_rank(rankings.get('ascent', []), 'm', '{:.0f}')}",
     ]
     if with_active_days:
         parts.append(

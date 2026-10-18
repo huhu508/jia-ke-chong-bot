@@ -5,7 +5,7 @@ from datetime import date
 from app.models.daily_record import DailyRecord
 from app.models.manual_distance import ManualDistance
 from app.models.member import Member
-from app.services.ranking import compute_range_rankings, today_distance_rank
+from app.services.ranking import compute_range_rankings, format_leaderboards, today_distance_rank
 
 
 def _seed(db_session):
@@ -51,6 +51,7 @@ def test_day_rankings(db_session):
     dist = dict(r["distance"])
     assert dist["甲"] == 10.0
     assert dist["乙"] == 5.0  # 日榜按明细聚合
+    assert "max_single" not in r  # 单次运动距离排行已删除，榜单只出距离/爬升/运动天数
 
 
 def test_week_rankings_uses_manual_week_distance(db_session):
@@ -99,3 +100,26 @@ def test_today_distance_rank(db_session):
     assert today_distance_rank("222", db_session, d=d) == 3
     # 当日无距离记录 → 不参与名次
     assert today_distance_rank("999", db_session, d=d) is None
+
+
+def test_format_leaderboards_no_single_distance_section():
+    # 单次运动距离排行已删除：即使调用方仍传入 max_single 键（防御未来回归），
+    # 渲染结果也不应出现该段；距离/爬升两段保留，月榜运动天数排行正常追加。
+    r = {
+        "distance": [("甲", 10.0), ("乙", 5.0)],
+        "ascent": [("甲", 100.0)],
+        "max_single": [("甲", 8.0)],
+        "active_days": [("甲", 10)],
+    }
+    text = format_leaderboards(r, "🏆 测试排行（9月20日）")
+    assert "🚀" not in text
+    assert "单次运动距离排行" not in text
+    assert "📏 运动距离排行" in text
+    assert "⛰️ 爬升排行" in text
+    assert "📅 运动天数排行" not in text  # with_active_days 默认 False
+
+    text_month = format_leaderboards(r, "🏆 测试排行（9月）", with_active_days=True)
+    assert "📅 运动天数排行" in text_month
+    # 爬升段与天数排行之间恰好一个空行（删除单次距离段后排版不塌）
+    assert "\n\n⛰️ 爬升排行" in text_month
+    assert "爬升排行\n🥇 甲  100 m\n\n📅 运动天数排行" in text_month

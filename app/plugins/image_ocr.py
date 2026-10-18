@@ -81,10 +81,15 @@ async def _download(bot: Bot, seg) -> bytes:
     except Exception as e:
         logger.warning(f"get_image 失败，尝试直接下载 url: {e}")
     if url:
-        async with httpx.AsyncClient(timeout=30, verify=net.verify_tls(url)) as c:
-            r = await c.get(url)
-            r.raise_for_status()
-            return r.content
+        # 兜底分支同样需要包异常：公网图床/证书过期或自签会抛 SSLError（TLS 校验已按地址
+        # 开启），不包会让异常冒泡到 handle_image，用户收不到任何回复。失败按既有语义返回空。
+        try:
+            async with httpx.AsyncClient(timeout=30, verify=net.verify_tls(url)) as c:
+                r = await c.get(url)
+                r.raise_for_status()
+                return r.content
+        except Exception as e:
+            logger.warning(f"直接下载图片 url 失败: {e}")
     return b""
 
 
@@ -206,15 +211,10 @@ async def handle_image(bot: Bot, event: MessageEvent):
     img_md5 = hashlib.md5(img_bytes).hexdigest()
     img_dhash = _dhash(img_bytes)
 
-    # 重复打卡去重：同一张图（含群内转发）已成功记过，直接跳过。前置到 OCR/视觉之前，
-    # 既防重复累计，也避免重复截图反复消耗本地 OCR 与视觉调用（不再上传/识别第二遍）。
-    if _is_duplicate(img_md5, img_dhash):
-        logger.info(f"[图片识别] qq={qq} 检测到重复截图，跳过识别")
-        await image_matcher.finish("⏳ 这张截图刚才已经记过啦，本次不重复累计")
-
-    # 提前读取绑定状态：已绑定平台的成员，数据以平台接口为准，截图仅作回显，
-    # 无需（也不应）为一句「以 App 为准」把截图发给视觉模型兜底。这里先查一次，
-    # 供下方「跳过 vision 上传」与「已绑定只回显不写库」两处共用，避免重复开 session。
+    # 先读绑定状态：已绑定成员的截图只回显、不写库，既没有「重复累计」风险，
+    # 「刚才记过啦」的提示对他们也不成立；因此去重只对未绑定成员执行。
+    # 这里提前查一次，供「去重范围」「跳过 vision 上传」「已绑定只回显不写库」三处共用，
+    # 避免重复开 session（也修掉了原先「去重在前、读绑定在后」的语义错位）。
     session = get_session()
     try:
         member = session.get(Member, qq)
@@ -223,6 +223,12 @@ async def handle_image(bot: Bot, event: MessageEvent):
             name = member.display_name
     finally:
         session.close()
+
+    # 重复打卡去重（仅未绑定成员）：同一张图（含群内转发）已成功记过，直接跳过。
+    # 前置到 OCR/视觉之前，既防重复累计，也避免重复截图反复消耗本地 OCR 与视觉调用。
+    if not bound and _is_duplicate(img_md5, img_dhash):
+        logger.info(f"[图片识别] qq={qq} 检测到重复截图，跳过识别")
+        await image_matcher.finish("⏳ 这张截图刚才已经记过啦，本次不重复累计")
 
     # 保存原始图片，便于排查 OCR 识别误差
     try:
@@ -239,6 +245,18 @@ async def handle_image(bot: Bot, event: MessageEvent):
         logger.warning(f"[图片识别] qq={qq} OCR 识别失败: {e}")
         result = []
 
+    async def _vision_fallback() -> dict:
+        """视觉模型兜底识别；未配置 / 关闭 / 失败一律返回空 dict（截图不出本机）。
+
+        受 settings.llm_vision_enabled 与 LLM_API_KEY 双重闸门控制（见 llm.vision_extract），
+        仅在「OCR 读不出距离」或「识别结果可疑」时调用，绝不无条件上传每张截图。
+        """
+        try:
+            return await asyncio.to_thread(llm.vision_extract, img_bytes) or {}
+        except Exception as e:
+            logger.warning(f"[图片识别] qq={qq} 视觉识别失败: {e}")
+            return {}
+
     # 解析兜底：解析器异常不应拖垮整条 handler，静默跳过即可
     try:
         text = "\n".join(str(item[1]) for item in result)
@@ -249,17 +267,15 @@ async def handle_image(bot: Bot, event: MessageEvent):
 
         data = dict(ocr_data)
 
-        # 视觉模型仅在本地 OCR 识别不出核心字段（距离）时才兜底，绝不无条件上传每张截图：
+        # 视觉模型仅在本地 OCR 读不出核心字段（距离）时才兜底，绝不无条件上传每张截图：
         # 落实「截图不出本机」的对外承诺，也避免无效/重复截图反复消耗视觉调用。
         # 已绑定成员（数据以 App 为准）连兜底也不触发——为一句回显上传截图不值得。
-        # llm_vision_enabled 关闭 / 无 key 时 vision_extract 直接返回 None（截图不出本机）。
+        # 用 get() 而非 in：距离「存在但为 0」同样视为没读出，否则不会触发兜底。
         vision_data: dict = {}
-        if "distance_km" not in ocr_data and not bound:
-            try:
-                vision_data = await asyncio.to_thread(llm.vision_extract, img_bytes) or {}
-            except Exception as e:
-                logger.warning(f"[图片识别] qq={qq} 视觉识别失败: {e}")
-                vision_data = {}
+        vision_used = False
+        if not ocr_data.get("distance_km") and not bound:
+            vision_data = await _vision_fallback()
+            vision_used = True  # 已就该图咨询过 vision，可疑复核不重复调用
 
         # 合并：以本地 OCR 为准，缺失/0 的字段用视觉结果补齐
         for k, v in vision_data.items():
@@ -299,6 +315,36 @@ async def handle_image(bot: Bot, event: MessageEvent):
             "· 若要查自己的周/月汇总：直接发「周数据」「月数据」，我会按平台接口自动统计。"
         )
 
+    # 可疑图补一次视觉兜底：OCR 读出了距离但数值可疑（如 5.20 km 被读成 52.0 km →
+    # 距离/时长推出的速度明显超限；或每公里消耗离谱），说明识别质量存疑。此时若本次
+    # 还没咨询过 vision、且非绑定成员，只对这一张可疑图补一次视觉 + 分歧复核：
+    # 只有可疑图才多一次调用（成本可控），换准确性受益（避免错值直接污染排行与累计里程）。
+    # 必须在 sanitize_activity 之前判定——sanitize 会把超限的时长/卡路里丢掉，
+    # 届时判定所需的信息已丢失。
+    signals = parsers.suspicious_signals(data)
+    if signals and not vision_used and not bound:
+        logger.info(f"[图片识别] qq={qq} 识别结果可疑（{'；'.join(signals)}），补一次视觉兜底")
+        fallback = await _vision_fallback()
+        if fallback:
+            for k, v in fallback.items():
+                if k not in data or not data.get(k):
+                    data[k] = v
+            conflicts = parsers.find_field_conflicts(data, fallback)
+            if conflicts:
+                recon = (
+                    await asyncio.to_thread(
+                        llm.vision_reconcile, img_bytes, data, fallback, conflicts
+                    )
+                    or {}
+                )
+                for k in conflicts:
+                    if k in recon:
+                        data[k] = recon[k]
+                logger.info(
+                    f"[图片识别] qq={qq} 可疑复核分歧 {conflicts}："
+                    f"合并前={ {k: data.get(k) for k in conflicts} }，复核={recon}"
+                )
+
     # 合理性校验：OCR 偶发把步数 / 卡路里 / 统计页总量误识别成距离，落库前先清洗+拦截，
     # 超范围的夸张跑量直接拒绝，避免污染排行与累计里程（这是 detect_page_kind 之外的最后防线）。
     data, reject_reason = parsers.sanitize_activity(data)
@@ -322,8 +368,19 @@ async def handle_image(bot: Bot, event: MessageEvent):
             "avg_hr",
         )
     ):
-        logger.info(f"[图片识别] qq={qq} 未识别出运动数据，静默跳过")
-        return
+        # 读不出运动字段时的交互分级：
+        #   - 已绑定成员：截图本就不记录（数据以 App 为准），静默跳过；
+        #   - OCR 零文字且视觉也无果（纯照片/风景大图）：静默，避免对群内大图产生噪音；
+        #   - 其余（OCR 有文字但读不出运动字段）：回复引导，不再让用户「发了图没反应」。
+        if bound or (not result and not vision_data):
+            logger.info(f"[图片识别] qq={qq} 未识别出运动数据，静默跳过")
+            return
+        logger.info(f"[图片识别] qq={qq} 未识别出运动数据，回复引导")
+        await image_matcher.finish(
+            "🔍 没认出这张图里的运动数据…\n"
+            "· 记录单次运动：请发**单次运动详情页**截图（含这一次的距离/时长/配速）；\n"
+            "· 查汇总数据：直接发「周数据」「月数据」，我会按平台接口自动统计。"
+        )
 
     # 已绑定平台 → 只展示不写库（数据已由平台接口自动同步）；
     # 未绑定平台 → 累加累计里程 + 写当日明细（供排行，含爬升/配速等）。

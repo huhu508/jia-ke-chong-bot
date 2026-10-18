@@ -49,10 +49,20 @@ def _nearby_number(text: str, keywords, max_window: int = 20):
 
 
 # 时长 pattern：顺序即优先级（三冒号先于单冒号，避免「1:24:00」被单冒号截断）。
+# 前两条冒号格式带 `(?<![\d午])(\d{1,2})` 双重约束，防止把日期时间误读成运动时长：
+#   - `\d{1,2}` 上限：真实运动时长不可能 >99 小时；`\d+` 会把「2026-09-0810:00:00」
+#     从「0810」起匹配（前一字符是「-」，lookbehind 挡不住）；
+#   - `(?<!\d)`：挡「10:00:00」紧贴日期数字的情况；
+#   - `午` 进 lookbehind：挡「下午4:04」「9月19日@下午9:20」这类时钟时间。
+# 带空格的「2026-09-08 10:00:00」lookbehind 挡不住（前是空格），由
+# _search_duration_patterns 的日期上下文守卫（_is_datetime_prefix）另行拦截。
 _DURATION_PATTERNS = [
-    (r"(\d+):(\d{1,2}):(\d{1,2})", lambda m: int(m.group(1)) * 60 + int(m.group(2))),  # 时:分:秒
     (
-        r"(\d+):(\d{1,2})",
+        r"(?<![\d午])(\d{1,2}):(\d{1,2}):(\d{1,2})",
+        lambda m: int(m.group(1)) * 60 + int(m.group(2)),
+    ),  # 时:分:秒
+    (
+        r"(?<![\d午])(\d{1,2}):(\d{1,2})",
         lambda m: int(m.group(1)),
     ),  # 分:秒（运动时长 <1h 时 COROS 显示「40:16」= 40分16秒）
     (r"(\d+)\s*小时\s*(\d+)\s*分", lambda m: int(m.group(1)) * 60 + int(m.group(2))),  # X小时Y分
@@ -62,6 +72,37 @@ _DURATION_PATTERNS = [
     ),  # Xh Ymin
     (r"(\d+)\s*(?:分钟|[Mm][Ii][Nn])", lambda m: int(m.group(1))),  # X分钟 / X min
 ]
+
+# 日期片段（紧贴匹配串之前出现 → 是日期时间，不是运动时长）：
+# 2026-09-08 / 2026年9月23日 / 9月18日 / 9-18 / 09/18 等；`日?\d*` 允许尾部
+# 粘连小时数字（「2026-09-0810:00:00」无空格式），`[上下]午` 覆盖「9月19日 上午 9:20」。
+_DATETIME_PREFIX = re.compile(
+    r"(?:\d{4}[-/年.]\d{1,2}[-/月.]\d{1,2}日?\d*"
+    r"|\d{1,2}月\d{1,2}日?\d*"
+    r"|\d{1,2}[-/]\d{1,2}\d*)\s*(?:[上下]午)?\s*$"
+)
+
+
+def _is_datetime_prefix(before: str) -> bool:
+    """匹配串之前紧贴日期片段（2026-09-08 / 9月18日 等）→ 这是日期时间，不是运动时长。"""
+    return _DATETIME_PREFIX.search(before) is not None
+
+
+def _search_duration_patterns(t: str):
+    """逐 pattern 逐匹配搜索时长，返回分钟数；识别不出返回 None。
+
+    两层防线：匹配串前紧贴日期片段 → 跳过（是日期时间）；匹配值为 0 分钟 → 跳过
+    （0 分钟无意义，多为被拦日期时间的「00:00」内层子串）。
+    """
+    for pat, fn in _DURATION_PATTERNS:
+        for m in re.finditer(pat, t):
+            if _is_datetime_prefix(t[: m.start()]):
+                continue
+            minutes = fn(m)
+            if not minutes:
+                continue
+            return minutes
+    return None
 
 
 def _match_duration_minutes(text: str):
@@ -79,10 +120,9 @@ def _nearby_duration(text: str, keywords, max_window: int = 30):
     for kw in keywords:
         for m in re.finditer(re.escape(kw), text, re.IGNORECASE):
             tail = text[m.end() : m.end() + max_window]
-            for pat, fn in _DURATION_PATTERNS:
-                m = re.search(pat, tail)
-                if m:
-                    return fn(m)
+            minutes = _search_duration_patterns(tail)
+            if minutes is not None:
+                return minutes
     return None
 
 
@@ -108,6 +148,14 @@ def parse_activity(text: str) -> dict:
         m = re.search(r"(\d+(?:\.\d+)?)\s*(?:公里|千米|[Kk][Mm])\b", text)
         if m:
             v = m.group(1)
+    # 合理性下限：文本兜底读到 QQ 号/日期串级离谱值（如「里程已由…取代」旁边的 1213513439）
+    # 直接丢弃，让「距离缺失 → 视觉兜底」路径接手，而不是走到 sanitize 整体拒收。
+    if v is not None:
+        try:
+            if not (0 < float(_normalize_number(v)) <= 1000):
+                v = None
+        except ValueError:
+            v = None
     if v is not None:
         data["distance_km"] = float(_normalize_number(v))
 
@@ -243,7 +291,8 @@ _FIELD_SPECS = [
     {
         "key": "avg_pace_sec_per_km",
         "labels": ["平均配速", "配速", "pace", "average pace", "avg pace"],
-        "units": ["/km", "min/km"],
+        # 「/公里」「分/公里」覆盖 Garmin 中文界面「5:23/公里」式合并框
+        "units": ["/km", "min/km", "/公里", "分/公里"],
         "kind": "pace",
         "convert": lambda v: int(v),
     },
@@ -342,17 +391,11 @@ def _extract_number(text: str, allow_decimal: bool = True):
 def _extract_duration(text: str):
     """从框文本提取时长（分钟），返回 int 或 None。"""
     t = text.strip()
-    # 冒号格式：时:分:秒 或 分:秒
-    m = re.search(r"(\d+):(\d{1,2})(?::(\d{1,2}))?", t)
-    if m:
-        if m.group(3) is not None:
-            return int(m.group(1)) * 60 + int(m.group(2))
-        return int(m.group(1))
-    # 文字/单位格式
-    for pat, fn in _DURATION_PATTERNS:
-        m = re.search(pat, t)
-        if m:
-            return fn(m)
+    # 冒号/文字/单位格式统一走 _search_duration_patterns（含日期时间守卫，
+    # 跳过「2026-09-08 10:00:00」这类日期时间串）
+    minutes = _search_duration_patterns(t)
+    if minutes is not None:
+        return minutes
     # 纯数字（配合「min/分钟」单位框，如 Keep 顶部「112」）
     m = re.fullmatch(r"(\d[\d,]*)", t)
     if m:
@@ -437,7 +480,38 @@ def _iter_items(result) -> list:
     return items
 
 
-def _value_near(items, anchor, extractor):
+# 候选值的「离谱值」过滤区间（比 _VALID_RANGES 宽松，只挡 QQ 号/日期串级误读；
+# 严格范围校验仍归 sanitize_activity）。空间关联时先用它排除明显不可能的值，
+# 否则 QQ 号框会赢过更远的真值框。时长/睡眠提取时单位是分钟。
+_CANDIDATE_RANGES = {
+    "distance_km": (0.05, 1000.0),  # >1000 直接排除（QQ 号/日期串误读）
+    "calories": (1.0, 30000.0),
+    "active_minutes": (1.0, 1440.0),
+    "steps": (1.0, 200000.0),
+    "sleep_hours": (1.0, 1440.0),  # 提取阶段为分钟，转换前过滤
+    "ascent_meters": (0.0, 10000.0),
+    "avg_pace_sec_per_km": (30.0, 1800.0),
+    "avg_hr": (30.0, 250.0),
+}
+
+
+def _plausible(spec: dict, v) -> bool:
+    """判断提取值是否落在候选合理区间（无区间限制的字段一律放行）。
+
+    提取阶段的值可能是原始字符串（如「6,23」逗号小数、「1,234」千分位），
+    先经 _normalize_number 归一化再转 float。
+    """
+    lo, hi = _CANDIDATE_RANGES.get(spec["key"], (None, None))
+    if lo is None:
+        return True
+    try:
+        fv = float(_normalize_number(str(v)))
+    except (ValueError, TypeError):
+        return False
+    return lo <= fv <= hi
+
+
+def _value_near(items, anchor, extractor, spec=None):
     """在 anchor 框附近找能提取出值的框，返回提取出的值或 None。
 
     候选框与 anchor 的空间关系：
@@ -445,7 +519,7 @@ def _value_near(items, anchor, extractor):
       - 下方（苹果健身：标签在上、值在下）
       - 左侧同行（单位在值右，如「15.02 km」分框）
       - 右侧同行（标签在左、值在右，如「距离 5.2」分框）
-    多个候选取离 anchor 最近的。
+    多个候选取离 anchor 最近的；离谱值（QQ 号/日期串级）先按 _plausible 排除。
     """
     best = None
     best_dist = 1e9
@@ -453,7 +527,7 @@ def _value_near(items, anchor, extractor):
         if it is anchor:
             continue
         v = extractor(it["text"])
-        if v is None:
+        if v is None or (spec is not None and not _plausible(spec, v)):
             continue
         dx = it["cx"] - anchor["cx"]
         dy = it["cy"] - anchor["cy"]
@@ -511,14 +585,14 @@ def _extract_field(items, spec):
             # 距离的 6.23）。真正的纯标签（距离/配速/心率…）从不含数字，跳过安全。
             if re.search(r"\d", t):
                 continue
-            v = _value_near(items, it, extractor)
+            v = _value_near(items, it, extractor, spec)
             if v is not None:
                 return v
 
     # 2) 单位框定位（「km」「kcal」「min」等独立单位框）
     for it in items:
         if it["text"].strip().lower() in units:
-            v = _value_near(items, it, extractor)
+            v = _value_near(items, it, extractor, spec)
             if v is not None:
                 return v
 
@@ -527,7 +601,7 @@ def _extract_field(items, spec):
         t = it["text"].strip()
         if t[:1].isdigit() and _has_unit_token(t, units):
             v = extractor(t)
-            if v is not None:
+            if v is not None and _plausible(spec, v):
                 return v
 
     return None
@@ -563,24 +637,45 @@ _SUMMARY_TITLE_KEYWORDS = (
     "周报",
     "年报",
     "数据总览",
+    "今日活动",  # Garmin 首页特征（「今日活动 5.57公里」不应当作单次运动）
 )
 
 # 弱信号标题词：单字「统计」也出现在佳明单次详情页底部的 tab（概述/统计/计圈/图表），
 # 单独出现不足以判为统计页，降为 1 分，需配合其他强信号（「N 次运动」、多条活动条目等）。
 _WEAK_TITLE_KEYWORDS = ("统计",)
 
+# 运动类型词（复合词在前，避免「户外跑步」被拆成「跑步」重复计数）：
+# 列表页会列出多条运动；但详情页也可能出现 2 次（佳明：标题 + 地点行「伊春市 跑步」，
+# 或地图 POI「杭电游泳」），故阈值取 ≥3 才计分，宁可漏判 2 条的列表也不误伤详情页。
+_SPORT_TYPE_WORDS = re.compile(
+    "户外跑步|室内跑步|户外骑行|室内骑行|越野跑|徒步|健走|快走|游泳|登山|椭圆机|划船机|跳绳|跑步|骑行"
+)
+
+# 「M/D H:MM」式列表条目时间（9/18 07:30、09-18 07:30、9月18日 07:30）：
+# 列表/历史页逐条带起止时间；单条详情页最多一条（起始时间）。
+_DATETIME_ENTRY = re.compile(r"\d{1,2}(?:[-/]\d{1,2}|月\d{1,2}日)\s*\d{1,2}:\d{2}")
+
+# 距离值信号的正则：数字前不得紧跟字母/汉字（排除「东风12km」「最快1公里」这类
+# 风速/圈速标注），单位后不得紧跟 / 或字母/汉字（排除「12km/h」）。
+_DISTANCE_VALUE = re.compile(
+    r"(?<![\dA-Za-z一-鿿])\d+(?:\.\d+)?\s*(?:km|公里|千米)(?![/A-Za-z一-鿿])",
+    re.IGNORECASE,
+)
+
 
 def detect_page_kind(text: str) -> str:
     """判断截图是「单次运动详情」还是「统计/列表」页。
 
-    统计/列表页（月汇总、活动列表、历史记录等）展示的是**多条**运动的聚合，
-    不适合作为「一次运动」写入，返回 ``"summary"``；否则返回 ``"activity"``。
+    统计/列表页（月汇总、活动列表、历史记录、App 首页等）展示的是**多条**运动的聚合
+    或当日概览，不适合作为「一次运动」写入，返回 ``"summary"``；否则返回 ``"activity"``。
 
     采用打分制（阈值 3），基于 OCR 纯文本的强信号，避免误伤单条详情：
-      1. 标题/入口关键词（筛选、历史记录、月报…）—— 每条 3 分；
+      1. 标题/入口关键词（筛选、历史记录、月报、今日活动…）—— 每条 3 分；
       1b. 弱信号标题词「统计」（佳明单次详情页底部也有此 tab）—— 仅 1 分；
       2. 汇总计数「N 次运动 / 训练 / 锻炼」—— 3 分；
-      3. 多条活动条目（≥2 个「星期X/周X」或 ≥3 个 km 距离值）—— 各 2 分；
+      3. 多条活动条目：≥3 个运动类型词（户外跑步/骑行…）2 分；
+         ≥3 个距离值（km/公里/千米，排除风速/圈速标注）2 分；
+         ≥2 个「M/D H:MM」条目时间 3 分；
       4. 年月头（如「2026年9月」）—— 弱信号 1 分。
     """
     t = (text or "").strip()
@@ -600,8 +695,12 @@ def detect_page_kind(text: str) -> str:
     # 3) 多条活动条目
     if len(re.findall(r"星期[一二三四五六日天]|周[一二三四五六日天]", t)) >= 2:
         score += 2
-    if len(re.findall(r"\d+(?:\.\d+)?\s*km\b", t, re.IGNORECASE)) >= 3:
+    if len(_SPORT_TYPE_WORDS.findall(t)) >= 3:
         score += 2
+    if len(_DISTANCE_VALUE.findall(t)) >= 3:
+        score += 2
+    if len(_DATETIME_ENTRY.findall(t)) >= 2:
+        score += 3
     # 4) 年月头（弱信号）
     if re.search(r"\d{4}\s*年\s*\d{1,2}\s*月", t):
         score += 1
@@ -635,6 +734,11 @@ _MAX_SPEED_KMH = 30.0
 # 高于上限多为把整日/汇总总量误读成单次消耗。超区间仅丢弃 calories（非核心字段）。
 _MIN_KCAL_PER_KM = 10.0
 _MAX_KCAL_PER_KM = 400.0
+
+# 可疑信号阈值：距离达到该值却没有识别出时长 → 疑似小数位错读放大 10 倍
+# （如 5.02 → 50.2）。25 km 以上的真实长跑时长几乎必显示在详情页，
+# 读不出时长本身就是识别质量存疑的信号；≥100 km 已由 sanitize 整体拒绝。
+_SUSPICIOUS_DISTANCE_NO_DURATION_KM = 25.0
 
 
 def sanitize_activity(data: dict) -> tuple[dict, str | None]:
@@ -687,6 +791,48 @@ def sanitize_activity(data: dict) -> tuple[dict, str | None]:
             cleaned.pop("calories", None)
 
     return cleaned, reject
+
+
+def suspicious_signals(data: dict) -> list[str]:
+    """检测识别结果里的「可疑信号」：识别质量存疑、值得补一次视觉复核。
+
+    与 ``sanitize_activity`` 的交叉校验共用同一组阈值常量（``_MAX_SPEED_KMH`` /
+    ``_MIN_KCAL_PER_KM`` / ``_MAX_KCAL_PER_KM``），保证「清洗时会丢弃的字段」与
+    「判定可疑」口径一致。返回可疑原因的中文描述列表（空列表 = 未见异常）。
+
+    典型场景：OCR 把 5.20 km 读成 52.0 km——52 km 没超出 100 km 上限、拦不住，
+    但距离/时长推出的速度会明显超限，此处即可命中。调用方据此对这张图补一次视觉
+    兜底，而不是把错值直接落库污染排行与累计里程。
+
+    另一典型场景：小数位错读放大 10 倍且**时长没读出**（速度/千卡校验无从谈起），
+    用「距离大却无时长」单独判可疑——25 km 以上的真实长跑时长几乎必显示在详情页。
+
+    仅在「已有距离」时才判定：没有距离的图走「缺失补齐」逻辑，不属于本函数范围。
+    """
+    reasons: list[str] = []
+    dist = data.get("distance_km")
+    if not dist or dist <= 0:
+        return reasons
+
+    minutes = data.get("active_minutes")
+    if minutes:
+        speed_kmh = dist / (minutes / 60.0)
+        if speed_kmh > _MAX_SPEED_KMH:
+            reasons.append(
+                f"距离/时长推出 {speed_kmh:.0f} km/h，超过 {_MAX_SPEED_KMH:.0f} km/h 上限"
+            )
+    elif dist >= _SUSPICIOUS_DISTANCE_NO_DURATION_KM:
+        reasons.append(
+            f"距离 {dist:g} km 却未识别出时长，疑似距离数值误读（如小数位错读放大 10 倍）"
+        )
+
+    calories = data.get("calories")
+    if calories is not None:
+        kcal_per_km = calories / dist
+        if not (_MIN_KCAL_PER_KM <= kcal_per_km <= _MAX_KCAL_PER_KM):
+            reasons.append(f"每公里消耗 {kcal_per_km:.0f} 千卡，超出合理区间")
+
+    return reasons
 
 
 # ---------------------------------------------------------------------------

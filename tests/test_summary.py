@@ -42,6 +42,8 @@ def test_summary_weighted(db_session):
     assert s["distance_km"] == 15.0
     assert s["active_minutes"] == 90
     assert s["calories"] == 800
+    # 单次最长距离只保留在打卡落库路径，个人汇总不再返回该键
+    assert "max_activity_distance_km" not in s
     # 配速按距离加权：(300*10 + 360*5) / 15 = 320
     assert s["avg_pace_sec_per_km"] == 320.0
     # 心率按时长加权：(150*60 + 160*30) / 90 = 153.33 → 153

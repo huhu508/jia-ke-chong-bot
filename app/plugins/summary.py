@@ -127,8 +127,6 @@ def _format_summary(name: str, period: str, span: str, s: dict) -> str:
         lines.append(f"🏃 平均配速：{format_pace(s['avg_pace_sec_per_km'])} /km")
     if s["avg_hr"]:
         lines.append(f"💓 平均心率：{s['avg_hr']} bpm")
-    if s["max_activity_distance_km"]:
-        lines.append(f"🏆 单次最长：{s['max_activity_distance_km']} km")
     return f"{name} {period}运动数据：\n" + "\n".join(lines)
 
 

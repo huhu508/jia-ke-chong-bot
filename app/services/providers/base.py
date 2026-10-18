@@ -29,7 +29,7 @@ class DailyStats(BaseModel):
     training_load: float = 0.0  # 运动负荷（无量纲分数，各平台口径不一）
     avg_pace_sec_per_km: float = 0.0  # 平均配速（秒/公里）
     avg_hr: int = 0  # 运动平均心率（bpm）
-    max_activity_distance_km: float = 0.0  # 单次运动最长距离（服务排行）
+    max_activity_distance_km: float = 0.0  # 单次运动最长距离（仅在打卡落库时读取，不参与排行/展示）
     raw: Optional[dict] = None
 
 

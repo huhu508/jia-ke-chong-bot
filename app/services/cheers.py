@@ -146,7 +146,7 @@ def format_stat_lines(d, *, calories_label: str = "活动消耗") -> list[str]:
 
     ``d`` 支持 dict 或带同名属性的对象（DailyStats / DailyRecord），统一 ``get``/``getattr`` 取值。
     顺序参考主流运动 App「用户最关心」：步数 / 距离 / 配速 / 爬升 / 时长 / 消耗 / 心率 / 负荷 /
-    单次最长 / 睡眠。口径与 checkin.is_active_day 一致（消耗=运动消耗，非基础代谢）。
+    睡眠。口径与 checkin.is_active_day 一致（消耗=运动消耗，非基础代谢）。
     """
 
     def g(k: str):
@@ -170,8 +170,6 @@ def format_stat_lines(d, *, calories_label: str = "活动消耗") -> list[str]:
         lines.append(f"💓 平均心率：{g('avg_hr')} bpm")
     if g("training_load"):
         lines.append(f"⚡ 运动负荷：{g('training_load'):.0f}")
-    if g("max_activity_distance_km"):
-        lines.append(f"🏆 单次最长：{g('max_activity_distance_km')} km")
     if g("sleep_hours"):
         lines.append(f"😴 睡眠：{g('sleep_hours')} 小时")
     return lines

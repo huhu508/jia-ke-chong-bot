@@ -1,6 +1,6 @@
 """个人运动汇总：按时间范围聚合**单个成员自己**的 daily_record，输出周/月数据总结。
 
-与 ranking.py（跨成员三榜）不同，这里只关心「一个人」的各项指标总和/均值，
+与 ranking.py（跨成员排行）不同，这里只关心「一个人」的各项指标总和/均值，
 供「周数据」「月数据」这类个人查询，以及「总结」（AI 解读）复用。
 """
 
@@ -22,7 +22,7 @@ def compute_member_summary(qq: str, start: date, end: date, session: Session | N
     默认内部自开 session（阻塞 DB 调用），供 asyncio.to_thread 直接执行；测试可
     传入 session 注入临时库。返回 dict：active_days / activities / distance_km /
     ascent_meters / active_minutes / calories / training_load /
-    max_activity_distance_km / avg_pace_sec_per_km / avg_hr。
+    avg_pace_sec_per_km / avg_hr。
     平均配速按距离加权、平均心率按时长加权；无任何数据时各项为 0 / 空。
     """
     own_session = session is None
@@ -51,7 +51,6 @@ def compute_member_summary(qq: str, start: date, end: date, session: Session | N
     active_minutes = 0
     calories = 0
     load = 0.0
-    max_single = 0.0
     pace_wsum = 0.0  # 配速 × 距离
     pace_w = 0.0  # 距离权重
     hr_wsum = 0.0  # 心率 × 时长
@@ -67,7 +66,6 @@ def compute_member_summary(qq: str, start: date, end: date, session: Session | N
         active_minutes += r.active_minutes or 0
         calories += r.calories or 0
         load += r.training_load or 0.0
-        max_single = max(max_single, r.max_activity_distance_km or 0.0)
 
         dist = r.distance_km or 0.0
         mins = r.active_minutes or 0
@@ -87,7 +85,6 @@ def compute_member_summary(qq: str, start: date, end: date, session: Session | N
         "active_minutes": active_minutes,
         "calories": calories,
         "training_load": round(load, 2),
-        "max_activity_distance_km": round(max_single, 2),
         "avg_pace_sec_per_km": round(pace_wsum / pace_w, 1) if pace_w > 0 else 0.0,
         "avg_hr": round(hr_wsum / hr_w) if hr_w > 0 else 0,
     }

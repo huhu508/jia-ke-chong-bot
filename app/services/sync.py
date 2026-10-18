@@ -384,8 +384,8 @@ def sync_today_all(exclude_qq: str | None = None) -> int:
 # 平台接口——距上次全量同步不足 _SYNC_TODAY_ALL_MIN_INTERVAL_SEC 秒就复用上次结果。
 _sync_today_all_at = 0.0
 _SYNC_TODAY_ALL_MIN_INTERVAL_SEC = 600.0  # 10 分钟
-# 全量同步互斥锁：多个成员同时查「今日」会各自触发一次全量同步（查询风暴），
-# 非阻塞获取——拿不到锁说明已有一轮全量同步在进行中，直接复用其结果即可。
+# 全量同步互斥锁：多个成员同时查「今日」会各自触发一次全量同步（查询风暴）。
+# 阻塞获取——等前一轮同步真正落库完成后再判断是否复用，避免调用方读到不含增量的旧数据。
 _sync_today_all_lock = threading.Lock()
 
 
@@ -399,17 +399,16 @@ def sync_today_all_throttled(
     榜单播报与「排行」命令仍走无节流的 sync_today_all 保证最终口径。
     exclude_qq 透传给 sync_today_all：跳过调用方已单独同步过的本人。
 
-    单飞保证：用非阻塞锁串行化，避免并发查询风暴时多个线程同时跑全量同步、
-    重复登录同一批平台账号。
+    单飞保证（阻塞等锁）：用互斥锁串行化，避免并发查询风暴时多个线程同时跑全量同步、
+    重复登录同一批平台账号。这里**阻塞等待**而非拿不到就返回——正在进行的这一轮同步
+    尚未落库，直接返回会让调用方读到不含本轮增量的旧数据（「截图与 App 名次对不上」）。
+    等锁后本轮写入已 commit，再按时间戳判断是否复用，名次口径严格一致。
+    调用方都在 asyncio.to_thread 内，线程内阻塞安全（不卡事件循环）。
     """
     if time.time() - _sync_today_all_at < min_interval_sec:
         return 0
-    if not _sync_today_all_lock.acquire(blocking=False):
-        return 0  # 已有一轮全量同步在进行中，复用其结果
-    try:
-        # 双重检查：拿锁的间隙里时间戳可能已被上一轮推进
+    with _sync_today_all_lock:
+        # 双重检查：等锁期间前一轮可能已完成并推进时间戳 → 直接复用其结果
         if time.time() - _sync_today_all_at < min_interval_sec:
             return 0
         return sync_today_all(exclude_qq=exclude_qq)
-    finally:
-        _sync_today_all_lock.release()

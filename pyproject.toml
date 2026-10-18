@@ -9,7 +9,9 @@ dependencies = [
     "fastapi>=0.110",
     "uvicorn>=0.29",
     "websockets>=12.0",
-    "sqlalchemy>=2.0",
+    # >=2.1：2.0.39 及更早的 2.0.x 在 Python 3.13 上会让 `Mapped[date]` 抛
+    # TypeError: Boolean value of this clause is not defined（import app.models 即崩）
+    "sqlalchemy>=2.1",
     "pydantic>=2.0",
     "pydantic-settings>=2.0",
     "httpx>=0.27",
