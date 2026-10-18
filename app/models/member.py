@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import DateTime, String, func
+from sqlalchemy import DateTime, Integer, String, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from .base import Base
@@ -24,6 +24,8 @@ class Member(Base):
     custom_nickname: Mapped[str] = mapped_column(String(64), default="")
     # 绑定的运动平台：garmin / coros（其余平台无开放接口，靠截图，不进此字段）
     platform: Mapped[str] = mapped_column(String(16), default="")
+    # 成员年龄（岁，0=未设置）：用于最大心率估算（Tanaka 208−0.7×年龄）→ Karvonen 心率区间
+    age: Mapped[int] = mapped_column(Integer, default=0)
     # 平台账号标识（凭据按 QQ 存 data/accounts/<platform>_<qq>.json，Fernet 加密落盘；此字段留空备用）
     platform_account: Mapped[str] = mapped_column(String(128), default="")
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())

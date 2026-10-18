@@ -91,7 +91,8 @@ async def build_analysis(qq: str, nickname: str, kind: str, race_text: str = "")
 
     kind: ``周``/``月``；race_text 为可选比赛成绩原文（如「5k 25:00」）。
     三合一输出：数据摘要 → AI 总结（失败降级模板）→ 训练建议（失败降级模板）→
-    确定性诊断（无数据但有成绩时单独出诊断）。
+    确定性诊断（含心率区间/负荷状态；未给比赛成绩时自动用历史最快配速估算，
+    并明确标注「非比赛成绩」）。
     """
     name, period, span, s, bound = await _gather_qq(qq, nickname, kind)
 
@@ -104,7 +105,14 @@ async def build_analysis(qq: str, nickname: str, kind: str, race_text: str = "")
 
     session = get_session()
     try:
-        result = diagnose.compute_diagnosis(session, qq, race)
+        # 减少输入摩擦：未给比赛成绩时，自动从历史记录挑「最快单次 5k/10k」配速估算
+        # （展示层会明确标注「基于历史记录的估算，非比赛成绩」）
+        race_estimated = False
+        if race is None:
+            est = diagnose.estimate_best_race(session, qq)
+            if est is not None:
+                race, race_estimated = est, True
+        result = diagnose.compute_diagnosis(session, qq, race, race_estimated=race_estimated)
     finally:
         session.close()
 

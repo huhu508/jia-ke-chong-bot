@@ -36,6 +36,7 @@ SessionLocal = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False
 _MIGRATIONS = {
     "member": {
         "custom_nickname": "VARCHAR(64) DEFAULT ''",
+        "age": "INTEGER DEFAULT 0",
     },
     "daily_record": {
         "ascent_meters": "FLOAT DEFAULT 0",

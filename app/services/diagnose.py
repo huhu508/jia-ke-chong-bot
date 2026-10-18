@@ -3,8 +3,9 @@
 设计原则（务必遵守）：
 1. 日常聚合数据（每日平均配速 / 平均心率）**不能可靠反推** VO₂max 或预测比赛成绩
    ——这些「精确」指标只在用户主动提供最近一次比赛成绩时，才用 VDOT / Riegel 公式计算；
-2. 日常数据只用于它擅长的：训练负荷（ACWR，基于周跑量）、跑量趋势、恢复信号
-   （睡眠 / 静息心率）、配速相对趋势；
+   若用历史训练配速自动估算（estimate_best_race），必须明确标注「非比赛成绩」且精度更低；
+2. 日常数据只用于它擅长的：训练负荷（ACWR，基于周跑量；CTL/ATL/TSB，基于跑量 EWMA）、
+   跑量趋势、恢复信号（睡眠 / 静息心率）、配速相对趋势、心率区间（Karvonen）；
 3. 所有结论都是「提示 / 估算」，标注不确定性，不冒充医学诊断，不编造医学结论。
 
 公式出处：
@@ -14,15 +15,24 @@
 - 成绩预测：Riegel，``T₂ = T₁·(D₂/D₁)^1.06``。
 - 训练配速：由 VO₂max 反推各强度（%VO₂max），参考 Daniels 训练体系近似值。
 - 负荷比：急性:慢性负荷比（ACWR，Gabbett 等），作为受伤风险的提示信号之一。
+- 最大心率：Tanaka 等（J Am Coll Cardiol 2001），``HRmax = 208 − 0.7×年龄``，
+  为人群平均公式、个体误差约 ±7~10 bpm，仅作估算。
+- 心率区间：Karvonen 储备心率法，目标心率 = 静息心率 + 百分比×(HRmax − 静息心率)。
+- CTL/ATL/TSB：Banister 冲量-响应模型的简化应用（TrainingPeaks 等采用的
+  EWMA 负荷追踪），CTL 时间常数 42 天、ATL 7 天、TSB = CTL − ATL；
+  本实现以**日跑量**作为负荷输入（不含强度信息，结论只作趋势参考）。
 """
 
+import math
 import re
 from datetime import timedelta
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from ..models.checkin_log import CheckinLog
 from ..models.daily_record import DailyRecord
+from ..models.member import Member
 from . import timeutil
 from .checkin import is_active_day
 from .cheers import format_pace
@@ -184,11 +194,197 @@ def _acwr_level(acwr: float) -> tuple[str, str]:
     return "偏高", "近期加量过猛，建议适当减量或增加恢复，降低受伤风险。"
 
 
-def compute_diagnosis(session: Session, qq: str, race: tuple[float, int] | None = None) -> dict:
+# ---------------------------------------------------------------------------
+# 心率区间（Karvonen 储备心率法）
+# ---------------------------------------------------------------------------
+
+# 五区间模型（%HRR）：与主流可穿戴设备的 5 区模型一致。
+_HR_ZONES = [
+    ("Z1 热身/恢复", 0.50, 0.60, "恢复/热身强度，训练刺激有限——适合恢复跑，别指望它涨能力"),
+    ("Z2 有氧基础", 0.60, 0.70, "轻松跑甜区，打有氧地基——大部分跑量应该落在这一区"),
+    ("Z3 有氧节奏", 0.70, 0.80, "节奏强度，提升有氧能力——效果好但疲劳积累快，别每天都是它"),
+    ("Z4 乳酸阈", 0.80, 0.90, "阈强度，高效刺激乳酸阈——每周 1~2 次足够"),
+    ("Z5 最大摄氧", 0.90, 1.00, "高强度区间，刺激 VO₂max——量要少而精"),
+]
+
+
+def hr_max_from_age(age: int) -> int:
+    """最大心率估算（Tanaka 2001：208 − 0.7×年龄）。
+
+    人群平均公式，个体误差约 ±7~10 bpm；仅用于心率区间估算，不是精确值。
+    """
+    return int(round(208 - 0.7 * age))
+
+
+def heart_rate_zones(age: int, resting_hr: int) -> list[tuple[str, int, int, str]]:
+    """按 Karvonen 储备心率法计算五区间，返回 [(区间名, 下限bpm, 上限bpm, 说明), ...]。
+
+    HR = 静息心率 + %HRR × (HRmax − 静息心率)，HRmax 用 Tanaka 公式估算。
+    """
+    hr_max = hr_max_from_age(age)
+    hrr = hr_max - resting_hr
+    out = []
+    for label, lo_pct, hi_pct, note in _HR_ZONES:
+        low = int(round(resting_hr + lo_pct * hrr))
+        high = int(round(resting_hr + hi_pct * hrr))
+        out.append((label, low, high, note))
+    return out
+
+
+def zone_for_avg_hr(zones: list, avg_hr: int) -> tuple[int, str]:
+    """判断平均心率落在哪个区间，返回 (区间下标, 结论句)。
+
+    注意：平均心率是整次运动的均值，落在某区 ≠ 全程都在该区；低于 Z2 下限视为
+    「训练刺激偏弱」（回答「这次是不是白练了」）。
+    """
+    if not zones or not avg_hr:
+        return -1, ""
+    if avg_hr < zones[0][1]:
+        return -1, (
+            f"{avg_hr} bpm 低于 Z1 下限（{zones[0][1]} bpm）——接近散步/恢复强度，"
+            "训练刺激很小（除非今天是刻意安排的恢复跑）"
+        )
+    for i, (label, low, high, note) in enumerate(zones):
+        if low <= avg_hr <= high:
+            return i, f"{avg_hr} bpm 落在 {label}（{low}~{high} bpm）——{note}"
+    return -1, f"{avg_hr} bpm 超出 Z5 上限——心率读数可能异常，建议检查设备"
+
+
+# ---------------------------------------------------------------------------
+# 训练负荷状态（CTL / ATL / TSB，跑量 EWMA）
+# ---------------------------------------------------------------------------
+
+_CTL_DAYS = 42  # 慢性负荷时间常数（天）
+_ATL_DAYS = 7  # 急性负荷时间常数（天）
+_LOAD_HISTORY_DAYS = 60  # 回看窗口（覆盖 CTL 时间常数后仍有余量）
+
+
+def _ewma(series: list[float], tau: int) -> float:
+    """指数加权移动平均（首值作为种子）。
+
+    CTL_t = CTL_{t-1} + (load_t − CTL_{t-1}) × (1 − e^(−1/τ))。
+    """
+    alpha = 1 - math.exp(-1.0 / tau)
+    ctl = series[0]
+    for x in series[1:]:
+        ctl += alpha * (x - ctl)
+    return ctl
+
+
+def compute_load_status(session: Session, qq: str, today=None) -> dict | None:
+    """按日跑量计算 CTL/ATL/TSB（Banister 冲量-响应模型的简化应用）。
+
+    回看近 60 天，缺失日按 0 跑量补齐（休息日本就该是 0）。数据不足 7 天返回 None。
+    返回 {ctl, atl, tsb, ratio, verdict, days}；ratio = TSB/CTL 做无量纲化，
+    阈值是经验参考区间（跑量负荷不含强度信息，只作趋势参考，非诊断结论）。
+    """
+    today = today or timeutil.today()
+    start = today - timedelta(days=_LOAD_HISTORY_DAYS - 1)
+    rows = session.execute(
+        select(DailyRecord.record_date, DailyRecord.distance_km).where(
+            DailyRecord.member_qq == qq,
+            DailyRecord.record_date >= start,
+            DailyRecord.record_date <= today,
+        )
+    ).all()
+    km_by_day = {d: (km or 0.0) for d, km in rows}
+    series = [km_by_day.get(start + timedelta(days=i), 0.0) for i in range(_LOAD_HISTORY_DAYS)]
+    active_days = sum(1 for x in series if x > 0)
+    if active_days < 7:
+        return None
+
+    ctl = _ewma(series, _CTL_DAYS)
+    atl = _ewma(series, _ATL_DAYS)
+    tsb = ctl - atl
+    ratio = tsb / ctl if ctl > 0 else 0.0
+
+    if ratio >= 0.15:
+        verdict = "状态新鲜，适合上强度（负荷已被消化，是安排高质量训练或比赛的好时机）"
+    elif ratio >= 0.05:
+        verdict = "恢复良好，可以正常训练"
+    elif ratio > -0.05:
+        verdict = "正常训练状态，保持当前节奏"
+    elif ratio > -0.25:
+        verdict = "偏疲劳，注意安排恢复日，别连续上强度"
+    else:
+        verdict = "明显疲劳，建议主动减量恢复，降低受伤风险"
+
+    return {
+        "ctl": round(ctl, 1),
+        "atl": round(atl, 1),
+        "tsb": round(tsb, 1),
+        "ratio": round(ratio, 2),
+        "verdict": verdict,
+        "days": active_days,
+    }
+
+
+# ---------------------------------------------------------------------------
+# 历史最快配速自动估算比赛成绩（减少输入摩擦）
+# ---------------------------------------------------------------------------
+
+_ESTIMATE_WINDOW_DAYS = 90  # 只取最近 90 天的训练记录，保证与当前状态相关
+# 估算目标：单次 5k 用 4~8 km 的训练配速推算、10k 用 8~15 km（避免距离差距过大失真）
+_ESTIMATE_TARGETS = [("5k", 5.0, 4.0, 8.0), ("10k", 10.0, 8.0, 15.0)]
+# 配速合理范围（秒/公里）：排除 OCR/接口脏数据
+_EST_PACE_MIN = 150
+_EST_PACE_MAX = 600
+
+
+def estimate_best_race(session: Session, qq: str, today=None) -> tuple[float, int] | None:
+    """从历史记录里挑「最快单次配速」估算 5k/10k 成绩，返回 (distance_km, time_sec)。
+
+    候选来源：截图打卡明细（checkin_log：单次距离+时长）与平台日明细
+    （daily_record：当日平均配速；绑定成员单次运动的日子即单次配速）。
+    按距离窗口过滤（5k 用 4~8 km、10k 用 8~15 km），取最快配速推算。
+    这是**训练配速的线性外推**，不是竭尽全力成绩，精度低于真实比赛成绩，
+    必须在展示层明确标注「基于历史记录的估算，非比赛成绩」。
+    """
+    today = today or timeutil.today()
+    start = today - timedelta(days=_ESTIMATE_WINDOW_DAYS - 1)
+
+    # 候选：(distance_km, pace_sec_per_km)；paced 来源两类并集
+    candidates: list[tuple[float, float]] = []
+    logs = session.execute(
+        select(CheckinLog.distance_km, CheckinLog.active_minutes).where(
+            CheckinLog.member_qq == qq, CheckinLog.record_date >= start
+        )
+    ).all()
+    for km, mins in logs:
+        km = km or 0.0
+        if km > 0 and (mins or 0) > 0:
+            candidates.append((km, mins * 60.0 / km))
+    days = session.execute(
+        select(DailyRecord.distance_km, DailyRecord.avg_pace_sec_per_km).where(
+            DailyRecord.member_qq == qq, DailyRecord.record_date >= start
+        )
+    ).all()
+    for km, pace in days:
+        # 平台日均配速仅当当日只有一次运动时才接近单次配速；多活动日跳过
+        if (km or 0.0) > 0 and pace and (km or 0.0) <= 15.0:
+            candidates.append((km, float(pace)))
+
+    for _label, target_km, lo, hi in _ESTIMATE_TARGETS:
+        paces = [
+            p for km, p in candidates if lo <= km <= hi and _EST_PACE_MIN <= p <= _EST_PACE_MAX
+        ]
+        if paces:
+            best = min(paces)
+            return target_km, int(round(best * target_km))
+    return None
+
+
+def compute_diagnosis(
+    session: Session,
+    qq: str,
+    race: tuple[float, int] | None = None,
+    race_estimated: bool = False,
+) -> dict:
     """汇总诊断所需的全部指标。
 
-    返回 dict：records / weekly / acwr / recovery / pace_trend / race（含 vo2max、
-    predictions、paces）。数据不足处用 None 标记，由 format 层决定是否展示。
+    返回 dict：records / weekly / acwr / recovery / pace_trend / hr_zones /
+    load_status / race（含 vo2max、predictions、paces；race_estimated=True 表示
+    成绩来自历史配速估算而非比赛）。数据不足处用 None 标记，由 format 层决定是否展示。
     """
     today = timeutil.today()
     records = _recent_records(session, qq, _WEEKS * 7)
@@ -258,10 +454,34 @@ def compute_diagnosis(session: Session, qq: str, race: tuple[float, int] | None 
         "acwr_verdict": acwr_verdict,
         "recovery": recovery,
         "pace_trend": pace_trend,
+        "hr_zones": None,
+        "load_status": None,
         "race": None,
     }
 
-    # 比赛成绩（仅在用户提供时计算精确指标）
+    # 心率区间（Karvonen）：需要年龄（Tanaka 估算最大心率）+ 静息心率；
+    # 平均心率取近 7 天最新一条有值的记录。
+    member = session.get(Member, qq)
+    if member is not None and member.age:
+        resting = recovery["resting_hr"]
+        if resting:
+            zones = heart_rate_zones(member.age, resting)
+            latest_hr = next((r.avg_hr for r in reversed(records) if (r.avg_hr or 0) > 0), 0)
+            idx, verdict = zone_for_avg_hr(zones, latest_hr)
+            result["hr_zones"] = {
+                "age": member.age,
+                "hr_max": hr_max_from_age(member.age),
+                "resting_hr": resting,
+                "zones": zones,
+                "avg_hr": latest_hr or None,
+                "zone_index": idx,
+                "verdict": verdict,
+            }
+
+    # 负荷状态（CTL/ATL/TSB，跑量 EWMA）
+    result["load_status"] = compute_load_status(session, qq, today)
+
+    # 比赛成绩（仅在用户提供或历史估算时计算精确指标）
     if race:
         dist, secs = race
         vo2 = vo2max_from_race(dist, secs)
@@ -273,6 +493,7 @@ def compute_diagnosis(session: Session, qq: str, race: tuple[float, int] | None 
                 (label, predict_race_time(dist, secs, target)) for label, target in _RACE_DISTANCES
             ],
             "paces": training_paces(vo2),
+            "estimated": race_estimated,
         }
 
     return result
@@ -320,6 +541,20 @@ def format_diagnosis(result: dict, name: str) -> str:
         lines.append(f"· 结论：{level} —— {advice}")
         lines.append("·（提示：ACWR 只是受伤风险的参考信号，个体差异大，非诊断结论）")
 
+    # 负荷状态（CTL/ATL/TSB）
+    ls = result["load_status"]
+    lines.append("")
+    lines.append("📉 负荷状态（CTL/ATL/TSB，按日跑量 EWMA 估算）")
+    if ls is None:
+        lines.append("· 近 60 天有效训练不足 7 天，暂无法计算负荷状态")
+    else:
+        lines.append(
+            f"· CTL（42 天慢性负荷）≈ {ls['ctl']} km/天，ATL（7 天急性负荷）≈ {ls['atl']} km/天"
+        )
+        tsb_str = f"+{ls['tsb']}" if ls["tsb"] >= 0 else str(ls["tsb"])
+        lines.append(f"· TSB = {tsb_str} km —— {ls['verdict']}")
+        lines.append("·（跑量负荷不含强度信息，阈值是经验参考区间，仅作趋势提示）")
+
     # 恢复信号
     rec = result["recovery"]
     lines.append("")
@@ -348,11 +583,35 @@ def format_diagnosis(result: dict, name: str) -> str:
         )
         lines.append(f"· {_pace_trend_verdict(pt['delta'])}")
 
+    # 心率区间（Karvonen）
+    hz = result["hr_zones"]
+    lines.append("")
+    lines.append("❤️ 心率区间（Karvonen 储备心率法）")
+    if hz is None:
+        lines.append(
+            "· 设置年龄并积累静息心率数据后可计算 Z1~Z5 心率区间：发「年龄 25」设置年龄"
+            "（最大心率按 Tanaka 公式估算）"
+        )
+    else:
+        lines.append(
+            f"· 按年龄 {hz['age']} 岁估算最大心率 ≈ {hz['hr_max']} bpm"
+            f"（静息 {hz['resting_hr']} bpm，个体误差 ±7~10）"
+        )
+        for label, low, high, _note in hz["zones"]:
+            lines.append(f"    {label}：{low}~{high} bpm")
+        if hz["avg_hr"]:
+            lines.append(f"· 最近平均心率 {hz['avg_hr']} bpm → {hz['verdict']}")
+            lines.append("·（平均心率是整次运动的均值，落在某区不等于全程都在该区）")
+
     # 比赛成绩解锁的精确指标
     race = result["race"]
     if race:
-        lines.append("")
-        lines.append("🎯 有氧能力（基于你给的比赛成绩，估算值）")
+        if race.get("estimated"):
+            lines.append("")
+            lines.append("🎯 有氧能力（基于历史最快配速的估算，非比赛成绩）")
+        else:
+            lines.append("")
+            lines.append("🎯 有氧能力（基于你给的比赛成绩，估算值）")
         lines.append(f"· VO₂max ≈ {race['vo2max']} ml/kg/min（±2 量级误差，供参考）")
         lines.append("· 成绩预测：")
         for label, secs in race["predictions"]:
@@ -360,11 +619,14 @@ def format_diagnosis(result: dict, name: str) -> str:
         lines.append("· 训练配速：")
         for label, pace in race["paces"].items():
             lines.append(f"    {label}：{format_pace(pace)}/km")
-        lines.append("·（基于 Riegel / VDOT 公式，仅对竭尽全力的比赛成绩有效）")
+        if race.get("estimated"):
+            lines.append("·（由最近 90 天最快训练配速线性外推，精度低于真实比赛成绩，仅供参考）")
+        else:
+            lines.append("·（基于 Riegel / VDOT 公式，仅对竭尽全力的比赛成绩有效）")
     else:
         lines.append("")
         lines.append("💡 想解锁 VO₂max / 成绩预测 / 训练配速？")
-        lines.append("· 发「诊断 5k 25:00」告诉我最近一次比赛成绩（距离 + 用时）即可")
+        lines.append("· 发「分析 5k 25:00」告诉我最近一次比赛成绩（距离 + 用时）即可")
 
     lines.append("━━━━━━━━━━━━")
     lines.append("· 建议：80% 跑量留在轻松强度、20% 上强度（极化训练），加量每周不超过 ~10%")

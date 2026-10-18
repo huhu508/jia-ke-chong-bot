@@ -1,4 +1,4 @@
-"""个人设置：/昵称 设置自定义显示昵称、/删除打卡 撤销最近一次截图打卡。"""
+"""个人设置：/昵称 设置自定义显示昵称、/年龄 设置年龄（心率区间估算用）、/删除打卡 撤销最近一次截图打卡。"""
 
 import re
 
@@ -14,6 +14,7 @@ from ..services import sync
 from ..services.member import get_or_create_member
 
 nickname_cmd = on_command("昵称", aliases={"设置昵称", "改名"}, priority=5, block=True)
+age_cmd = on_command("年龄", aliases={"设置年龄"}, priority=5, block=True)
 undo_cmd = on_command("删除打卡", aliases={"撤销打卡", "删除记录"}, priority=5, block=True)
 
 # 昵称会被拼进 LLM 的 prompt，过滤掉可注入的控制字符/结构符号（换行、引号、反引号、
@@ -52,6 +53,47 @@ async def handle_nickname(bot: Bot, event: MessageEvent, args: Message = Command
     except Exception as e:
         logger.exception(f"设置昵称失败: {e}")
         await nickname_cmd.finish(f"设置昵称失败：{e}")
+    finally:
+        session.close()
+
+
+@age_cmd.handle()
+async def handle_age(bot: Bot, event: MessageEvent, args: Message = CommandArg()):
+    qq = event.get_user_id()
+    text = args.extract_plain_text().strip()
+    session = get_session()
+    try:
+        member = get_or_create_member(session, qq, getattr(event.sender, "nickname", None))
+        if not text:
+            if member.age:
+                await age_cmd.finish(
+                    f"你设置的年龄：{member.age} 岁（用于最大心率 / 心率区间估算）\n"
+                    "· 发「年龄 25」修改\n"
+                    "· 发「年龄 清空」清除"
+                )
+            await age_cmd.finish(
+                "你还没有设置年龄。发「年龄 25」设置后，分析里会给出心率区间（Z1~Z5）\n"
+                "· 最大心率按 Tanaka 公式（208 − 0.7×年龄）估算"
+            )
+        if text in ("清空", "清除", "删除", "取消"):
+            member.age = 0
+            session.commit()
+            await age_cmd.finish("已清除年龄设置")
+        if not text.isdigit():
+            await age_cmd.finish("年龄要用数字，例如：年龄 25")
+        age = int(text)
+        if not 8 <= age <= 99:
+            await age_cmd.finish("年龄要在 8~99 岁之间")
+        member.age = age
+        session.commit()
+        await age_cmd.finish(
+            f"已设置年龄 {age} 岁，之后的「分析」会按此估算最大心率（Tanaka 公式）与心率区间"
+        )
+    except (FinishedException, ActionFailed):
+        raise
+    except Exception as e:
+        logger.exception(f"设置年龄失败: {e}")
+        await age_cmd.finish(f"设置年龄失败：{e}")
     finally:
         session.close()
 
