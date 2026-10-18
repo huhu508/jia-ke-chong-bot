@@ -21,7 +21,7 @@
 | 数据存储 | SQLAlchemy 2.0 + SQLite | 单文件、零运维、够用；`Session` 按需创建 |
 | OCR | RapidOCR（rapidocr-onnxruntime） | **本地**识别，截图数据不出本机 |
 | 平台 SDK | garminconnect / COROS 官方 MCP | 佳明仅邮箱登录；COROS 走 OAuth 授权码 + PKCE |
-| 大模型 | Agnes AI（OpenAI 兼容） | 国产、`agnes-3.0-flash`、接口稳定 |
+| 大模型 | 智谱 GLM-5.3-Flash（OpenAI 兼容） | 默认端点；原生多模态（文本 + 图片）、1M 上下文、约 0.8/2.8 元每百万 token；支持 LLM_FALLBACKS 模型池故障转移（可兜底本地 Ollama） |
 | 配置 | pydantic-settings | 类型安全读 `.env` |
 | 代码质量 | ruff（format + lint） | 单工具覆盖格式化 / 静态检查 / 导入排序 |
 
@@ -160,7 +160,7 @@ compute_range_rankings(start, end) → 按距离 / 爬升聚合（月榜追加�
 - ✅ 训练诊断（并入「分析」）：ACWR 负荷 / CTL·ATL·TSB 负荷状态（TRIMP 或跑量 EWMA，双基线按 HR 数据覆盖率自动切换）/ 强度分布（极化训练 80/20 检验，Seiler）/ Karvonen 心率区间 Z1~Z5（Tanaka 估算最大心率，需设年龄）/ 恢复信号 / 配速趋势 + 附比赛成绩算 VO₂max / 成绩预测（运动科学确定性公式，非 LLM）；裸「分析」不含成绩预测，结尾引导补 5k 最佳成绩解锁。
 - ✅ 日榜 / 周榜 / 月榜 + 定时播报（周日 / 月末自动追加）。
 - ✅ 活动播报（跑团日历）：固定周三例训 / 周五例跑自动进日历 + 手动活动覆盖 / 取消 + 每月末发下月日历图 + 活动前一天 23:00 提醒（管理员隐藏命令）。
-- ✅ Agnes AI 增强层（分析 / 鼓励 / 问答（结合本人数据上下文）/ 打卡点评，失败降级模板）。
+- ✅ 大模型增强层（默认 GLM-5.3-Flash：分析 / 鼓励 / 问答（结合本人数据上下文）/ 打卡点评，失败降级模板；LLM_FALLBACKS 端点池故障转移）。
 - ✅ 抽奖 / 骰子 / 随机数 互动玩法。
 - ✅ 代码规范化：ruff 格式化 + 静态检查全过，`pyproject.toml` 依赖补全。
 

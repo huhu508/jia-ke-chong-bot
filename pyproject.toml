@@ -1,7 +1,7 @@
 [project]
 name = "jia-ke-chong-bot"
 version = "0.1.0"
-description = "QQ 群运动数据机器人（Garmin / 高驰 COROS + 截图 OCR）"
+description = "甲壳虫：QQ 群运动搭子机器人——Garmin/COROS 接入 + 截图 OCR 打卡 + 排行播报 + 科学训练分析（负荷/强度分布/心率区间/VO₂max）"
 requires-python = ">=3.10"
 dependencies = [
     "nonebot2>=2.3.0",

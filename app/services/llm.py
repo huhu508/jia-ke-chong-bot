@@ -1,4 +1,4 @@
-"""AI 大模型服务：调用 Agnes AI（OpenAI 兼容）做运动数据解读/总结/问答/点评。
+"""AI 大模型服务：调用 OpenAI 兼容接口（默认智谱 GLM-5.3-Flash）做数据解读/总结/问答/点评。
 
 生态位（niche）设计：
   - LLM 是「锦上添花」的增强层，**绝不进核心数据链路**——OCR 识别、数据解析、
@@ -8,8 +8,9 @@
     仅在 settings.llm_vision_enabled 开启时才把截图发给视觉模型，默认开启、可关闭；
   - 抽象成独立 provider，换任意 OpenAI 兼容 API 只需改 base_url + key，无需动调用方。
 
-注意：Agnes AI 只支持标准 OpenAI 接口，不支持智谱内置 web_search 联网搜索工具，
-故本模块不再做联网搜索（换回支持联网的平台时再恢复）。
+默认模型 GLM-5.3-Flash 是原生多模态（文本 + 图片），因此「文本任务」与「识图兜底」可
+共用同一个端点；但它的 thinking 常开，短文案任务建议在 .env 设
+``LLM_REASONING_EFFORT=low``，避免思考 token 吃光 max_tokens 导致 content 为空。
 
 为阻塞网络调用，请在 asyncio.to_thread 中执行。
 """
@@ -22,11 +23,16 @@ import time
 import httpx
 from nonebot.log import logger
 
-from ..config import settings
+from ..config import LlmEndpoint, settings
 from .cheers import format_pace
 
-# 默认超时（秒）。Agnes 是 OpenAI 兼容中转，模型偶发慢响应；给足余量避免误判失败。
-_TIMEOUT = 45.0
+# 单次调用超时：实际取 settings.llm_timeout（.env 的 LLM_TIMEOUT），调用方传 None 时生效。
+# 直连 GLM（200 tok/s）建议 20~25s 让失败快速降级；走慢速中转站时保持 45s。
+
+# 短文案任务（打卡点评 / 里程碑 / 节日祝贺）的输出上限。给到 800 而非 200：
+# GLM-5.3-Flash 的 thinking 常开，思考 token 也计入 max_tokens，200 易被吃光导致
+# content 为空 → 误判失败并降级模板。max_tokens 只是上限，实际按生成量计费，不增成本。
+_SHORT_REPLY_TOKENS = 800
 
 # 可安全重试一次的瞬时网络异常（超时/断连）；业务性错误（4xx/5xx/空内容）不重试。
 _RETRYABLE_EXC = (
@@ -146,55 +152,105 @@ def _extract_content(data: dict) -> str | None:
         return None
 
 
-def _call(
-    messages: list[dict],
-    max_tokens: int = 400,
-    temperature: float = 0.7,
-    timeout: float = _TIMEOUT,
-    retries: int = 1,
-) -> str | None:
-    """调一次 chat/completions，返回 message.content 原文（已 strip）；失败/空返回 None。
-
-    统一处理三类失败，各做一件事：
-      - 瞬时网络异常（超时/断连）→ 重试一次；
-      - 业务错误（响应里带 error 字段）→ 直接放弃（重试无意义）；
-      - 空内容（推理模型被 max_tokens 截断等）→ 重试一次。
-    """
+def _primary_endpoint() -> LlmEndpoint | None:
+    """主端点（LLM_MODEL / LLM_BASE_URL / LLM_API_KEY）。未配 key 时返回 None。"""
     if not settings.llm_api_key:
         return None
+    return LlmEndpoint(
+        model=settings.llm_model,
+        base_url=settings.llm_base_url,
+        api_key=settings.llm_api_key,
+        reasoning_effort=settings.llm_reasoning_effort,
+        timeout=settings.llm_timeout,
+        vision=True,
+    )
+
+
+def _endpoints(vision: bool = False) -> list[LlmEndpoint]:
+    """按优先级组装端点池：主端点在前，其后依次是 LLM_FALLBACKS。
+
+    跳过未配 key 的备用端点；vision=True 时只保留声明支持图片的端点
+    （纯文本模型不参与识图兜底，避免白发一次必然失败的请求）。
+    返回空列表 = 没有任何可用端点，调用方直接降级模板。
+    """
+    endpoints: list[LlmEndpoint] = []
+    primary = _primary_endpoint()
+    if primary is not None:
+        endpoints.append(primary)
+    for ep in settings.llm_fallbacks:
+        if not (ep.api_key or "").strip():
+            continue
+        if vision and not ep.vision:
+            continue
+        endpoints.append(ep)
+    return endpoints
+
+
+def _build_payload(
+    ep: LlmEndpoint, messages: list[dict], max_tokens: int, temperature: float
+) -> dict:
+    """组装 chat/completions 请求体（纯函数，便于单测）。
+
+    ``reasoning_effort`` 只在该端点配置了非空值时才下发：默认留空 = 不带该字段，
+    保证对不支持它的服务商（旧中转站、纯文本本地模型等）完全向后兼容。
+    """
     payload = {
-        "model": settings.llm_model,
+        "model": ep.model,
         "messages": messages,
         "max_tokens": max_tokens,
         "temperature": temperature,
     }
-    # 分阶段超时：读超时用传入 timeout（模型慢响应的关键），连接/写/池固定小值
-    client_timeout = httpx.Timeout(connect=10.0, read=timeout, write=10.0, pool=10.0)
+    effort = (ep.reasoning_effort or "").strip()
+    if effort:
+        payload["reasoning_effort"] = effort
+    return payload
+
+
+def _call_endpoint(
+    ep: LlmEndpoint,
+    messages: list[dict],
+    max_tokens: int,
+    temperature: float,
+    timeout: float | None,
+    retries: int,
+) -> str | None:
+    """对**单个**端点调一次 chat/completions；失败/空返回 None（由 _call 决定是否换端点）。
+
+    统一处理三类失败：
+      - 瞬时网络异常（超时/断连）→ 重试一次；
+      - 业务错误（响应里带 error 字段 / 4xx）→ 直接放弃（重试无意义）；
+      - 空内容（思考/推理模型被 max_tokens 截断等）→ 重试一次。
+    401 鉴权失效视为该端点不可用，直接返回 None，由上层切到下一个端点。
+    """
+    payload = _build_payload(ep, messages, max_tokens, temperature)
+    # 超时优先级：调用方显式指定 > 端点配置 > 全局配置
+    read_timeout = timeout if timeout is not None else (ep.timeout or settings.llm_timeout)
+    client_timeout = httpx.Timeout(connect=10.0, read=read_timeout, write=10.0, pool=10.0)
     for attempt in range(retries + 1):
         try:
             resp = httpx.post(
-                settings.llm_base_url,
-                headers={"Authorization": f"Bearer {settings.llm_api_key}"},
+                ep.base_url,
+                headers={"Authorization": f"Bearer {ep.api_key}"},
                 json=payload,
                 timeout=client_timeout,
             )
         except _RETRYABLE_EXC as e:
-            logger.warning(f"大模型网络异常（第 {attempt + 1}/{retries + 1} 次）: {e}")
+            logger.warning(f"[{ep.model}] 网络异常（第 {attempt + 1}/{retries + 1} 次）: {e}")
             if attempt < retries:
                 time.sleep(0.5 * (attempt + 1))
                 continue
             return None
         except Exception as e:
-            logger.warning(f"大模型调用失败（将降级）: {e}")
+            logger.warning(f"[{ep.model}] 调用失败: {e}")
             return None
 
-        # 401 鉴权失效：重试无意义，直接放弃；5xx 可重试一次；其余 4xx 直接放弃
+        # 401 鉴权失效：重试无意义，交给上层换端点；5xx 可重试一次；其余 4xx 直接放弃
         if resp.status_code == 401:
-            logger.warning("大模型鉴权失败（401，key 无效或过期），将降级")
+            logger.warning(f"[{ep.model}] 鉴权失败（401，key 无效或过期）")
             return None
         if resp.status_code >= 500:
             logger.warning(
-                f"大模型服务端错误（{resp.status_code}，第 {attempt + 1}/{retries + 1} 次）"
+                f"[{ep.model}] 服务端错误（{resp.status_code}，第 {attempt + 1}/{retries + 1} 次）"
             )
             if attempt < retries:
                 time.sleep(0.5 * (attempt + 1))
@@ -204,25 +260,54 @@ def _call(
             resp.raise_for_status()
             data = resp.json()
         except Exception as e:
-            logger.warning(f"大模型调用失败（将降级）: {e}")
+            logger.warning(f"[{ep.model}] 调用失败: {e}")
             return None
 
         if isinstance(data, dict) and data.get("error"):
-            logger.warning(f"大模型返回业务错误（将降级）: {str(data['error'])[:200]!r}")
+            logger.warning(f"[{ep.model}] 返回业务错误: {str(data['error'])[:200]!r}")
             return None
         content = _extract_content(data)
         if content is not None:
             return content
-        logger.warning(f"大模型返回空内容，重试（第 {attempt + 1}/{retries + 1} 次）")
+        logger.warning(f"[{ep.model}] 返回空内容，重试（第 {attempt + 1}/{retries + 1} 次）")
         if attempt < retries:
             time.sleep(0.5 * (attempt + 1))
+    return None
+
+
+def _call(
+    messages: list[dict],
+    max_tokens: int = 400,
+    temperature: float = 0.7,
+    timeout: float | None = None,
+    retries: int = 1,
+    vision: bool = False,
+) -> str | None:
+    """按端点池顺序调用，返回第一个成功的内容；全部失败返回 None（由调用方降级）。
+
+    故障转移：主端点失败（网络 / 5xx / 401 / 业务错误 / 空内容重试后仍空）→ 自动切到
+    LLM_FALLBACKS 里的下一个端点；只有全部端点都失败才返回 None。
+    没有配置任何 key 时直接返回 None，机器人照常降级模板文案。
+    """
+    endpoints = _endpoints(vision=vision)
+    if not endpoints:
+        return None
+    for idx, ep in enumerate(endpoints):
+        content = _call_endpoint(ep, messages, max_tokens, temperature, timeout, retries)
+        if content is not None:
+            if idx > 0:
+                logger.info(f"大模型已切换到备用端点（{ep.model}，第 {idx + 1} 个）")
+            return content
+        if idx + 1 < len(endpoints):
+            logger.warning(f"端点 {ep.model} 不可用，尝试下一个")
+    logger.warning("大模型所有端点均不可用，降级模板")
     return None
 
 
 def _chat(
     messages: list[dict],
     max_tokens: int = 400,
-    timeout: float = _TIMEOUT,
+    timeout: float | None = None,
 ) -> str | None:
     """调一次大模型并做群聊友好清洗（去 Markdown + 身份兜底）。失败返回 None。"""
     content = _call(messages, max_tokens=max_tokens, temperature=0.7, timeout=timeout)
@@ -357,7 +442,7 @@ def checkin_cheer(name: str, data: dict) -> str | None:
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_text},
         ],
-        max_tokens=200,
+        max_tokens=_SHORT_REPLY_TOKENS,
         timeout=20.0,
     )
 
@@ -376,7 +461,7 @@ def milestone_cheer(name: str, days: int) -> str | None:
                 "content": f"{name} 今天达成了第 {days} 次运动打卡里程碑，请祝贺并鼓励一句。",
             },
         ],
-        max_tokens=200,
+        max_tokens=_SHORT_REPLY_TOKENS,
         timeout=20.0,
     )
 
@@ -395,7 +480,7 @@ def festival_cheer(name: str, festival: str, distance_km: float) -> str | None:
                 "content": f"{name} 在{festival}这天打卡 {distance_km} km，请庆祝并鼓励。",
             },
         ],
-        max_tokens=200,
+        max_tokens=_SHORT_REPLY_TOKENS,
         timeout=20.0,
     )
 
@@ -442,7 +527,8 @@ def classify_intent(text: str) -> dict | None:
 
     返回形如 ``{"intent": "today", "period": "week", "scope": "day", "range": "9月"}``。
     """
-    if not settings.llm_api_key:
+    # 没有主 key 也允许走备用端点池（本地 Ollama 等）；全部端点都没配时 _call 直接返回 None
+    if not _endpoints():
         return None
     system_prompt = (
         "你是「甲壳虫」机器人的内部意图分类模块，只做分类、不闲聊、不回答问题。"
@@ -471,10 +557,13 @@ def classify_intent(text: str) -> dict | None:
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": text.strip()},
         ],
-        max_tokens=300,
+        # 300 → 600：GLM-5.3-Flash 的思考 token 也占用 max_tokens，留足余量，
+        # 避免分类 JSON 被截断成空（→ 误降级纯问答）
+        max_tokens=600,
         temperature=0.1,
-        # 意图分类只做路由、不闲聊，短超时 + 不重试，避免拖慢 @问答 主链路
-        timeout=15.0,
+        # 意图分类只做路由、不闲聊，短超时 + 不重试，避免拖慢 @问答 主链路；
+        # 思考模型首 token 较慢，15s 偏紧，放宽到 20s
+        timeout=20.0,
         retries=0,
     )
     if content is None:
@@ -512,7 +601,8 @@ def vision_extract(img_bytes: bytes) -> dict | None:
     settings.llm_vision_enabled 开关控制（默认开启，关闭则截图绝不上传云端）。
     模型输出 JSON 后本地解析并做类型归一（字段与 parsers/DailyStats 对齐），异常一律 None。
     """
-    if not settings.llm_api_key or not settings.llm_vision_enabled:
+    # 只保留全局隐私闸门；是否有可用视觉端点交给端点池判断（_call(vision=True) 返回 None 即跳过）
+    if not settings.llm_vision_enabled:
         return None
     b64 = base64.b64encode(img_bytes).decode()
     system_prompt = (
@@ -536,7 +626,7 @@ def vision_extract(img_bytes: bytes) -> dict | None:
         ],
         max_tokens=300,
         temperature=0.1,
-        timeout=_TIMEOUT,
+        vision=True,
     )
     if content is None:
         return None
@@ -558,7 +648,7 @@ def vision_reconcile(
     回落保留 OCR 值（OCR 确定性优先）。与 vision_extract 同受 llm_vision_enabled 闸门，
     截图不上云时调用方已跳过本函数，数据不出本机。
     """
-    if not settings.llm_api_key or not settings.llm_vision_enabled or not conflicts:
+    if not settings.llm_vision_enabled or not conflicts:
         return None
     b64 = base64.b64encode(img_bytes).decode()
     keys = "、".join(conflicts)
@@ -589,7 +679,7 @@ def vision_reconcile(
         ],
         max_tokens=300,
         temperature=0.1,
-        timeout=_TIMEOUT,
+        vision=True,
     )
     if content is None:
         return None

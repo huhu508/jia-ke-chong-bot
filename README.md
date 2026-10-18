@@ -1,6 +1,6 @@
 # 甲壳虫 —— QQ 群运动数据机器人
 
-一个长期在线的 QQ 群运动搭子，接入 Garmin / 高驰 COROS 运动平台，支持群内查询、排行播报、截图打卡、打卡体系（里程碑 / 礼物 / 抽奖 / 节日彩蛋），并用 Agnes AI 大模型做数据解读与运动问答。
+一个长期在线的 QQ 群运动搭子，接入 Garmin / 高驰 COROS 运动平台，支持群内查询、排行播报、截图打卡、打卡体系（里程碑 / 礼物 / 抽奖 / 节日彩蛋），并用大模型（默认智谱 GLM-5.3-Flash）做数据解读与运动问答。
 
 ## 功能特性
 
@@ -8,13 +8,13 @@
 - **数据查询**：今日 / 周数据 / 月数据 / 近30天 / 详细数据（逐日明细），含距离、配速、爬升、时长、消耗、心率、负荷等。
 - **三榜排行**：日榜 / 周榜 / 月榜，每晚 23:00 自动播报（周日追加周榜、月末追加月榜）。
 - **打卡体系**：累计打卡天数、里程碑彩蛋、第 100 天礼物（先到先得）、群抽奖、节日 + 特殊距离彩蛋，全部**条件触发、幂等、可泛化**；发「打卡」还能看到累计 / 本月天数与**下一个里程碑倒计时**。
-- **AI 增强层（Agnes AI）**：分析 / 鼓励我 / @我运动问答（结合本人数据上下文）/ 打卡点评。**LLM 只做锦上添花**，未配 key 或调用失败一律降级到确定性模板文案，机器人照常可用。
+- **AI 增强层（默认 GLM-5.3-Flash）**：分析 / 鼓励我 / @我运动问答（结合本人数据上下文）/ 打卡点评。**LLM 只做锦上添花**，未配 key 或调用失败一律降级到确定性模板文案，机器人照常可用。
 - **活动播报（跑团日历）**：管理员私下维护跑团活动——每月末自动发下月「跑团日历」图（有活动的日期红圈标注 + 格内活动名），活动前一天 23:00 提醒。固定活动（每周三例训 16:00 / 每周五例跑 20:00，默认西北田径场）自动进日历，手动活动可覆盖、可取消某天固定活动。**命令对普通成员隐藏**。
 - **群互动玩法**：抽奖、骰子、随机数、帮助菜单。
 
 ## 技术栈
 
-NoneBot2 + OneBot v11（NapCat）· SQLAlchemy + SQLite · RapidOCR（本地识别）· Agnes AI（OpenAI 兼容）· Python 3.10+
+NoneBot2 + OneBot v11（NapCat）· SQLAlchemy + SQLite · RapidOCR（本地识别）· GLM-5.3-Flash（OpenAI 兼容）· Python 3.10+
 
 ## 目录结构
 
@@ -45,7 +45,7 @@ NoneBot2 + OneBot v11（NapCat）· SQLAlchemy + SQLite · RapidOCR（本地识�
     │   ├── ocr.py          # RapidOCR 本地识别（数据不出本机）
     │   ├── parsers.py      # 坐标关联解析 + 文本兜底
     │   ├── cheers.py       # 鼓励语库 + 配速格式化
-    │   ├── llm.py          # Agnes AI 增强层（总结/鼓励/建议/问答/点评）
+    │   ├── llm.py          # 大模型增强层（GLM，总结/鼓励/建议/问答/点评）
     │   ├── crypto.py       # 凭据加密存储（Fernet）
     │   ├── credentials.py  # 每用户凭据 / token 存储
     │   ├── member.py       # 成员创建 / 昵称清洗
@@ -103,16 +103,17 @@ NapCat 负责登录 QQ 并通过反向 WebSocket 把消息推给机器人：
 
 - 无官方个人数据接口，**不做云端接入**：直接发运动截图，机器人 OCR 识别并记入今日数据、累计里程与排行。
 
-## AI 能力（Agnes AI，可选增强层）
+## AI 能力（默认 GLM-5.3-Flash，可选增强层）
 
-在 `.env` 填 `LLM_API_KEY`（模型 `agnes-3.0-flash`）即可启用。设计上 LLM **只进增强层、不进核心数据链路**：
+在 `.env` 填 `LLM_API_KEY`（默认模型 `glm-5.3-flash`）即可启用。设计上 LLM **只进增强层、不进核心数据链路**：
 
 - OCR 识别、数据解析、排行聚合、平台同步全部走确定性代码；
 - 文本类能力（总结 / 鼓励 / 建议 / 问答 / 点评）只把「聚合后的数字」发给模型，不发送原始消息 / 账号密码；
 - 截图识图默认走本地 OCR；仅当 OCR 读不出核心字段（距离）时，才可能把截图发给视觉模型兜底（`LLM_VISION_ENABLED=false` 可彻底关闭，截图绝不上传云端）；
+- **模型池故障转移**：主端点失败（网络 / 5xx / key 失效 / 空内容）会自动切到下一端点，全部失败才降级模板——可配本地 Ollama 作兜底，**不依赖任何云端 key 也能跑**；
 - 未配 key 或调用失败一律降级到模板文案，机器人照常可用。
 
-底层走 OpenAI 兼容接口，改 `LLM_BASE_URL` + `LLM_MODEL` 即可换成任意 OpenAI 兼容服务。
+底层走 OpenAI 兼容接口，改 `LLM_BASE_URL` + `LLM_MODEL` 即可换成任意 OpenAI 兼容服务；备用端点用 `LLM_FALLBACKS` 配置（JSON 数组，示例见 `.env.example`）。
 
 ## 打卡体系
 
@@ -222,10 +223,13 @@ NapCat 负责登录 QQ 并通过反向 WebSocket 把消息推给机器人：
 | `SEMESTER_START` | `2026-09-20` | 打卡计数起点（本学期开学日） |
 | `GARMIN_IS_CN` | `true` | 佳明中国区开关 |
 | `COROS_REGION` | `cn` | COROS 区域（cn / us） |
-| `LLM_API_KEY` | （空） | Agnes AI key，留空自动禁用 AI 增强 |
-| `LLM_MODEL` | `agnes-3.0-flash` | 大模型名（OpenAI 兼容） |
-| `LLM_BASE_URL` | `https://apihub.agnes-ai.com/v1/chat/completions` | 大模型接口地址（OpenAI 兼容） |
-| `LLM_VISION_ENABLED` | `true` | 识图兜底开关：本地 OCR 读不出距离时才把截图发给视觉模型；`false` = 只用本地 OCR，截图绝不上传云端 |
+| `LLM_API_KEY` | （空） | 大模型 key（默认智谱），留空自动禁用 AI 增强 |
+| `LLM_MODEL` | `glm-5.3-flash` | 模型名（OpenAI 兼容；原生多模态，文本 + 图片） |
+| `LLM_BASE_URL` | `https://open.bigmodel.cn/api/paas/v4/chat/completions` | 接口地址（OpenAI 兼容） |
+| `LLM_REASONING_EFFORT` | （空） | 思考强度 `low`/`medium`/`max`；GLM 建议 `low`，留空则不下发该参数 |
+| `LLM_TIMEOUT` | `45` | 单次调用读超时（秒）；直连 GLM 建议 20~25 |
+| `LLM_VISION_ENABLED` | `true` | 识图兜底开关：本地 OCR 读不出距离 / 结果可疑时才把截图发给视觉模型；`false` = 只用本地 OCR，截图绝不上传云端 |
+| `LLM_FALLBACKS` | `[]` | 备用端点（JSON 数组）：主端点失败后按顺序切换，全部失败才降级模板；留空 = 只用主端点 |
 
 ## 数据与隐私
 
@@ -266,7 +270,7 @@ NapCat 负责登录 QQ 并通过反向 WebSocket 把消息推给机器人：
 - **绑定后查不到数据**：确认运动 App 已把当天数据同步到云端；Garmin 中国区账号需 `GARMIN_IS_CN=true`。
 - **发截图没反应**：表情包 / 缩略图（最长边 < 500px）会被自动跳过；确认发的是运动记录截图，而非统计/列表页。
 - **`今日` 报错**：看终端日志，多半是平台 API 返回结构变化，需微调 `app/services/providers/` 下的字段映射。
-- **AI 功能没生效**：检查 `.env` 的 `LLM_API_KEY` 是否填写、`LLM_MODEL` 是否为 `agnes-3.0-flash`；未填 key 时自动降级为模板文案，属正常行为。
+- **AI 功能没生效**：检查 `.env` 的 `LLM_API_KEY` 是否填写、`LLM_MODEL` 是否为 `glm-5.3-flash`；用 GLM 时 `LLM_REASONING_EFFORT` 建议设 `low`（思考常开，否则短文案易被思考 token 吃空而回落到模板）。未填 key 时自动降级为模板文案，属正常行为。
 
 ## 开源协议
 
