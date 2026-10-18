@@ -135,7 +135,7 @@ def test_estimate_best_race_picks_fastest_and_10k_fallback(db_session):
     est = estimate_best_race(db_session, "111", today=today)
     assert est == (5.0, round(25 * 60 / 4.5 * 5))
 
-    # 只有 10k 窗口候选（平台日均配速）→ 回退 10k 估算
+    # 只有 10k 窗口候选（平台单次运动日）→ 回退 10k 估算
     db_session.add(
         DailyRecord(
             member_qq="222",
@@ -143,11 +143,60 @@ def test_estimate_best_race_picks_fastest_and_10k_fallback(db_session):
             platform="coros",
             distance_km=10.0,
             avg_pace_sec_per_km=300.0,
+            activities_count=1,
         )
     )
     db_session.commit()
     est = estimate_best_race(db_session, "222", today=today)
     assert est == (10.0, 3000)
+
+
+def test_estimate_best_race_confidence_gates(db_session):
+    today = date(2026, 10, 18)
+    # 置信度门槛：全部应被忽略 → None
+    # ① 多活动日（activities_count=2）的日均配速混合了不同强度，不可用
+    db_session.add(
+        DailyRecord(
+            member_qq="111",
+            record_date=today - timedelta(days=1),
+            platform="coros",
+            distance_km=6.0,
+            avg_pace_sec_per_km=280.0,
+            activities_count=2,
+        )
+    )
+    # ② 距离低于 5k 窗口下限（4.5km）的短冲配速失真
+    db_session.add(
+        CheckinLog(
+            member_qq="111",
+            record_date=today - timedelta(days=2),
+            distance_km=4.3,
+            active_minutes=18,
+        )
+    )
+    # ③ 超过 30 天窗口的旧成绩不代表当前状态
+    db_session.add(
+        CheckinLog(
+            member_qq="111",
+            record_date=today - timedelta(days=40),
+            distance_km=5.0,
+            active_minutes=20,
+        )
+    )
+    db_session.commit()
+    assert estimate_best_race(db_session, "111", today=today) is None
+
+    # 加上一条合格的 5k 窗口单次记录 → 立即有估算
+    db_session.add(
+        CheckinLog(
+            member_qq="111",
+            record_date=today - timedelta(days=1),
+            distance_km=5.0,
+            active_minutes=25,
+        )
+    )
+    db_session.commit()
+    assert estimate_best_race(db_session, "111", today=today) == (5.0, 1500)
 
 
 def test_estimate_best_race_ignores_out_of_window_and_dirty(db_session):

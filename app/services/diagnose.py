@@ -320,12 +320,14 @@ def compute_load_status(session: Session, qq: str, today=None) -> dict | None:
 
 
 # ---------------------------------------------------------------------------
-# 历史最快配速自动估算比赛成绩（减少输入摩擦）
+# 历史最快配速自动估算比赛成绩（减少输入摩擦，置信度不足则不展示）
 # ---------------------------------------------------------------------------
 
-_ESTIMATE_WINDOW_DAYS = 90  # 只取最近 90 天的训练记录，保证与当前状态相关
-# 估算目标：单次 5k 用 4~8 km 的训练配速推算、10k 用 8~15 km（避免距离差距过大失真）
-_ESTIMATE_TARGETS = [("5k", 5.0, 4.0, 8.0), ("10k", 10.0, 8.0, 15.0)]
+_ESTIMATE_WINDOW_DAYS = 30  # 只取最近 30 天（当前体能状态相关；太久远的成绩不代表现在）
+# 估算目标：距离窗口收紧到目标距离的 0.9~1.4 倍——外推距离越近误差越小。
+# 5k 用 4.5~7 km、10k 用 9~13 km 的单次训练配速推算；窗口外（太短=冲刺配速失真、
+# 太长=不是目标距离的能力）一律不采用，宁可少展示也不给置信度低的数字。
+_ESTIMATE_TARGETS = [("5k", 5.0, 4.5, 7.0), ("10k", 10.0, 9.0, 13.0)]
 # 配速合理范围（秒/公里）：排除 OCR/接口脏数据
 _EST_PACE_MIN = 150
 _EST_PACE_MAX = 600
@@ -334,16 +336,18 @@ _EST_PACE_MAX = 600
 def estimate_best_race(session: Session, qq: str, today=None) -> tuple[float, int] | None:
     """从历史记录里挑「最快单次配速」估算 5k/10k 成绩，返回 (distance_km, time_sec)。
 
-    候选来源：截图打卡明细（checkin_log：单次距离+时长）与平台日明细
-    （daily_record：当日平均配速；绑定成员单次运动的日子即单次配速）。
-    按距离窗口过滤（5k 用 4~8 km、10k 用 8~15 km），取最快配速推算。
-    这是**训练配速的线性外推**，不是竭尽全力成绩，精度低于真实比赛成绩，
-    必须在展示层明确标注「基于历史记录的估算，非比赛成绩」。
+    候选来源（均须是**单次运动**，避免多活动混合配速失真）：
+      - 截图打卡明细（checkin_log：单次距离+时长算配速）；
+      - 平台日明细（daily_record：仅当日 activities_count == 1 时，日均配速才等于单次配速）。
+    置信度门槛（不满足返回 None，调用方不给用户反馈估算数字）：
+      - 最近 30 天内、距离落在目标的 0.9~1.4 倍窗口内、配速 2:30~10:00/km。
+    这是**训练配速的线性外推**，不是竭尽全力成绩：训练配速通常慢于比赛配速，
+    实际成绩往往比估算更快；必须在展示层明确标注「基于历史记录的估算，非比赛成绩」。
     """
     today = today or timeutil.today()
     start = today - timedelta(days=_ESTIMATE_WINDOW_DAYS - 1)
 
-    # 候选：(distance_km, pace_sec_per_km)；paced 来源两类并集
+    # 候选：(distance_km, pace_sec_per_km)；两类来源并集
     candidates: list[tuple[float, float]] = []
     logs = session.execute(
         select(CheckinLog.distance_km, CheckinLog.active_minutes).where(
@@ -355,13 +359,15 @@ def estimate_best_race(session: Session, qq: str, today=None) -> tuple[float, in
         if km > 0 and (mins or 0) > 0:
             candidates.append((km, mins * 60.0 / km))
     days = session.execute(
-        select(DailyRecord.distance_km, DailyRecord.avg_pace_sec_per_km).where(
-            DailyRecord.member_qq == qq, DailyRecord.record_date >= start
-        )
+        select(
+            DailyRecord.distance_km,
+            DailyRecord.avg_pace_sec_per_km,
+            DailyRecord.activities_count,
+        ).where(DailyRecord.member_qq == qq, DailyRecord.record_date >= start)
     ).all()
-    for km, pace in days:
-        # 平台日均配速仅当当日只有一次运动时才接近单次配速；多活动日跳过
-        if (km or 0.0) > 0 and pace and (km or 0.0) <= 15.0:
+    for km, pace, count in days:
+        # 仅单次运动的日均配速可用；多活动日混合了不同强度的配速，不可作为单次候选
+        if (km or 0.0) > 0 and pace and (count or 0) == 1:
             candidates.append((km, float(pace)))
 
     for _label, target_km, lo, hi in _ESTIMATE_TARGETS:
@@ -609,10 +615,14 @@ def format_diagnosis(result: dict, name: str) -> str:
         if race.get("estimated"):
             lines.append("")
             lines.append("🎯 有氧能力（基于历史最快配速的估算，非比赛成绩）")
+            # 训练配速推算的误差远大于比赛成绩回推：给宽区间，避免误导
+            lo = max(10, race["vo2max"] - 4)
+            hi = race["vo2max"] + 4
+            lines.append(f"· VO₂max ≈ {race['vo2max']}（参考区间 {lo}~{hi}）ml/kg/min")
         else:
             lines.append("")
             lines.append("🎯 有氧能力（基于你给的比赛成绩，估算值）")
-        lines.append(f"· VO₂max ≈ {race['vo2max']} ml/kg/min（±2 量级误差，供参考）")
+            lines.append(f"· VO₂max ≈ {race['vo2max']} ml/kg/min（±2 量级误差，供参考）")
         lines.append("· 成绩预测：")
         for label, secs in race["predictions"]:
             lines.append(f"    {label}：{_fmt_duration(secs)}")
@@ -620,13 +630,17 @@ def format_diagnosis(result: dict, name: str) -> str:
         for label, pace in race["paces"].items():
             lines.append(f"    {label}：{format_pace(pace)}/km")
         if race.get("estimated"):
-            lines.append("·（由最近 90 天最快训练配速线性外推，精度低于真实比赛成绩，仅供参考）")
+            lines.append(
+                "·（由最近 30 天最快单次训练配速推算，训练配速通常慢于比赛配速，"
+                "实际成绩往往比估算更快；只作能力量级参考）"
+            )
         else:
             lines.append("·（基于 Riegel / VDOT 公式，仅对竭尽全力的比赛成绩有效）")
     else:
         lines.append("")
         lines.append("💡 想解锁 VO₂max / 成绩预测 / 训练配速？")
         lines.append("· 发「分析 5k 25:00」告诉我最近一次比赛成绩（距离 + 用时）即可")
+        lines.append("· 历史里若有接近 5k/10k 的单次训练记录，会自动给出保守估算")
 
     lines.append("━━━━━━━━━━━━")
     lines.append("· 建议：80% 跑量留在轻松强度、20% 上强度（极化训练），加量每周不超过 ~10%")

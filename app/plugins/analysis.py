@@ -12,13 +12,14 @@
 import asyncio
 
 from nonebot import on_command
-from nonebot.adapters.onebot.v11 import Bot, Message, MessageEvent
+from nonebot.adapters.onebot.v11 import Bot, GroupMessageEvent, Message, MessageEvent
 from nonebot.exception import ActionFailed, FinishedException
 from nonebot.log import logger
 from nonebot.params import CommandArg
 
 from ..db import get_session
 from ..services import diagnose, llm
+from .admin import _send_private_robust
 from .summary import _format_summary, _gather_qq
 
 analyze_cmd = on_command(
@@ -160,9 +161,19 @@ async def handle_analyze(bot: Bot, event: MessageEvent, args: Message = CommandA
         text = await build_analysis(
             event.get_user_id(), getattr(event.sender, "nickname", None), kind, race_text
         )
-        await analyze_cmd.finish(text)
     except (FinishedException, ActionFailed):
         raise
     except Exception as e:
         logger.exception(f"分析生成失败: {e}")
         await analyze_cmd.finish(f"分析生成失败：{e}")
+
+    # 分析结果较长，群聊里刷屏不合适：群里只回一句提示，完整结果私发
+    # （优先群临时会话，无需加好友；退回好友私聊）。私发失败则退回群内展示。
+    if isinstance(event, GroupMessageEvent):
+        sent = await _send_private_robust(bot, int(event.get_user_id()), event.group_id, text)
+        if sent:
+            await analyze_cmd.finish(
+                "📬 分析结果比较长，已经私发给你啦～（没收到就私聊我再发一次「分析」）"
+            )
+        logger.warning(f"分析结果私发失败（qq={event.get_user_id()}），退回群内展示")
+    await analyze_cmd.finish(text)
