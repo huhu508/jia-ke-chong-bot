@@ -14,7 +14,7 @@ from ..services import checkin, cheers, llm, ranking, sync, timeutil
 from ..services.providers.base import DailyStats
 from .admin import notify_gift_claim
 
-query_cmd = on_command("今日", aliases={"步数", "今日运动", "运动"}, priority=5, block=True)
+query_cmd = on_command("今日", aliases={"今日运动", "运动"}, priority=5, block=True)
 
 
 def _format_stats(s: DailyStats) -> str:

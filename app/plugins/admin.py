@@ -361,7 +361,7 @@ async def handle_sync_all(bot: Bot, event: MessageEvent):
     _spawn(_backfill_async())
     await sync_all_cmd.finish(
         f"已开始后台同步 {len(members)} 人的历史数据（近 {BACKFILL_DAYS} 天），"
-        "完成后发「排行 / 周榜 / 月榜」即可看到正确数据"
+        "完成后发「日榜 / 周榜 / 月榜」即可看到正确数据"
     )
 
 
@@ -483,3 +483,30 @@ async def handle_delete_checkin(bot: Bot, event: MessageEvent, args: Message = C
         f"已删除 QQ {qq} 的记录 #{log_id}（{d.month}月{d.day}日 {dist} km），"
         "累计里程与当日排行已同步扣回"
     )
+
+
+admin_help_cmd = on_command("管理员命令", aliases={"管理命令"}, priority=5, block=True)
+
+# 需权限命令一览：普通帮助菜单不显式展示这些命令，管理员发「管理员命令」查阅。
+_ADMIN_HELP = (
+    "🔐 管理员命令\n"
+    "━━━━━━━━━━━━\n"
+    "· 机器状态 —— 平台绑定 / 截图记录概况\n"
+    "· 同步数据 —— 后台同步全部绑定成员历史\n"
+    "· 刷新昵称 —— 修正历史脏昵称\n"
+    "· 打卡记录 QQ —— 查看最近截图打卡明细\n"
+    "· 删除打卡记录 QQ 记录号 —— 删除指定截图打卡\n"
+    "· 添加活动 名称 日期 [时间] 地点 —— 添加跑团活动\n"
+    "· 活动列表 [YYYY-MM] —— 查看活动\n"
+    "· 删除活动 名称 日期 —— 删除手动活动 / 取消固定活动\n"
+    "· 预览月历 —— 预览下月跑团日历\n"
+    "· 补录截图 —— 补录今天群里未记录的截图\n"
+    "· 管理员命令 —— 查看本列表"
+)
+
+
+@admin_help_cmd.handle()
+async def handle_admin_help(bot: Bot, event: MessageEvent):
+    if not is_superuser(event):
+        await admin_help_cmd.finish("仅管理员可查看，普通成员发「帮助」看常规命令")
+    await admin_help_cmd.finish(_ADMIN_HELP)

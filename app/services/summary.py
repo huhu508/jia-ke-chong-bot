@@ -1,7 +1,7 @@
 """个人运动汇总：按时间范围聚合**单个成员自己**的 daily_record，输出周/月数据总结。
 
 与 ranking.py（跨成员排行）不同，这里只关心「一个人」的各项指标总和/均值，
-供「周数据」「月数据」这类个人查询，以及「总结」（AI 解读）复用。
+供「周数据」「月数据」「近30天」这类个人查询，以及「分析」（AI 解读）复用。
 """
 
 import re
@@ -95,7 +95,7 @@ def parse_range(text: str) -> tuple[date, date, str] | None:
 
     支持：近 N 天 / 近 N 个月 / X月（今年，未来月视为去年）/ YYYY年X月 /
     上月 / 本周 / 本月。刻意不含「年」粒度（一整年跨度太大，且明细只保留一年）。
-    供「数据」「历史」命令复用。
+    供「详细数据」命令复用。
     """
     t = (text or "").strip()
     if not t:
@@ -153,7 +153,7 @@ def compute_daily_list(
 
     同一成员同一天可能有多条 daily_record（多平台或截图），这里聚合成一天。
     每项：{date, distance_km, active_minutes, ascent_meters, activities_count,
-    avg_pace_sec_per_km(距离加权)}。供「历史」逐日明细命令使用。
+    avg_pace_sec_per_km(距离加权)}。供「详细数据」逐日明细命令使用。
     """
     own_session = session is None
     if own_session:

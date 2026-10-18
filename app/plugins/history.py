@@ -1,6 +1,6 @@
-"""历史数据查询：发「数据 [时间段]」看汇总、「历史 [时间段]」看逐日明细。
+"""历史明细查询：发「详细数据 [时间段]」看逐日明细。
 
-与「周数据 / 月数据」互补：那两个只查当前周/月，这里查任意历史区间。
+与「周数据 / 月数据 / 近30天」互补：那几个查当前周期的汇总，这里查任意区间的逐日明细。
 时间段支持：近30天 / 近3个月 / 9月 / 2026年9月 / 上月 / 本周 / 本月。
 """
 
@@ -19,15 +19,16 @@ from ..services import summary, sync, timeutil
 from ..services.cheers import format_pace
 from .summary import _format_summary
 
-data_cmd = on_command("数据", aliases={"查数据", "我的数据"}, priority=5, block=True)
-history_cmd = on_command("历史", aliases={"明细", "逐日", "训练记录"}, priority=5, block=True)
+history_cmd = on_command(
+    "详细数据", aliases={"历史", "明细", "逐日", "训练记录"}, priority=5, block=True
+)
 
 _USAGE = (
     "📊 用法：\n"
-    "· 数据 9月 —— 查某月汇总\n"
-    "· 数据 近30天 / 近3个月 —— 查时间段汇总\n"
-    "· 历史 9月 —— 查某月逐日明细\n"
-    "支持：近N天 / 近N个月 / X月 / 2026年X月 / 上月 / 本周 / 本月"
+    "· 详细数据 9月 —— 查某月逐日明细\n"
+    "· 详细数据 近30天 / 近3个月 —— 查时间段逐日明细\n"
+    "支持：近N天 / 近N个月 / X月 / 2026年X月 / 上月 / 本周 / 本月\n"
+    "（周期汇总请用「周数据 / 月数据 / 近30天」）"
 )
 
 
@@ -95,23 +96,6 @@ def _format_daily_list(name: str, label: str, days: list[dict]) -> str:
     return "\n".join(lines)
 
 
-@data_cmd.handle()
-async def handle_data(bot: Bot, event: MessageEvent, args: Message = CommandArg()):
-    try:
-        text = await build_range(
-            event.get_user_id(),
-            getattr(event.sender, "nickname", None),
-            args.extract_plain_text(),
-            False,
-        )
-        await data_cmd.finish(text)
-    except (FinishedException, ActionFailed):
-        raise
-    except Exception as e:
-        logger.exception(f"数据查询失败: {e}")
-        await data_cmd.finish(f"数据查询失败：{e}")
-
-
 @history_cmd.handle()
 async def handle_history(bot: Bot, event: MessageEvent, args: Message = CommandArg()):
     try:
@@ -125,5 +109,5 @@ async def handle_history(bot: Bot, event: MessageEvent, args: Message = CommandA
     except (FinishedException, ActionFailed):
         raise
     except Exception as e:
-        logger.exception(f"历史查询失败: {e}")
-        await history_cmd.finish(f"历史查询失败：{e}")
+        logger.exception(f"详细数据查询失败: {e}")
+        await history_cmd.finish(f"详细数据查询失败：{e}")

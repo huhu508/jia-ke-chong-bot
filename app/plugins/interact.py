@@ -10,21 +10,22 @@ from nonebot.log import logger
 from nonebot.params import CommandArg
 from nonebot.rule import to_me
 
-from ..services import guards, llm
+from ..services import guards, llm, summary
+from .analysis import build_analysis
 from .history import build_range
 from .query import build_today
 from .ranking import build_ranking
 from .summary import build_period
 
-# 首页菜单：只给四大类入口，避免一上来刷一大屏（群里反馈「字好多」）。
+# 首页菜单：只给三大类入口，避免一上来刷一大屏（群里反馈「字好多」）。
+# AI 能力刻意不在菜单显式展示（AI 融入各入口：分析 / 鼓励我 / 截图打卡点评 / @我问答）。
 HELP_OVERVIEW = (
     "🐞 甲壳虫使用说明\n"
     "━━━━━━━━━━━━\n"
-    "📊 查询 · 🔗 绑定 · 🤖 AI 助手 · 🎲 其它\n"
+    "📊 查询 · 🔗 绑定 · 🎲 其它\n"
     "· 发「帮助 查询」看查询命令\n"
-    "· 发「帮助 绑定」看绑定流程\n"
-    "· 发「帮助 ai」看 AI 玩法\n"
-    "· 发「帮助 其它」看抽奖 / 管理\n"
+    "· 发「帮助 绑定」看绑定与设置\n"
+    "· 发「帮助 其它」看抽奖 / 玩法\n"
     "有问题或想查数据，直接 @我 说一句即可。"
 )
 
@@ -33,38 +34,28 @@ _HELP_DETAILS = {
     "查询": (
         "📊 查询命令\n"
         "━━━━━━━━━━━━\n"
-        "· 今日 / 步数 —— 今日运动数据\n"
-        "· 周数据 / 月数据 —— 个人周 / 月汇总\n"
-        "· 总结（可加 月）—— AI 把数据说成人话\n"
-        "· 鼓励我 / 建议（可加 月）—— AI 鼓励 / 训练建议\n"
-        "· 诊断（可加 5k 25:00）—— 负荷 / 恢复 / 配速诊断\n"
-        "· 排行 / 周榜 / 月榜 —— 今日 / 本周 / 本月三榜\n"
-        "· 数据 9月 / 数据 近30天 —— 查任意时间段汇总\n"
-        "· 历史 9月 —— 查逐日明细\n"
+        "· 今日 —— 今日运动数据\n"
+        "· 周数据 / 月数据 / 近30天 —— 个人周期汇总\n"
+        "· 分析（可加 月 / 5k 25:00）—— 数据总结 + 训练建议 + 诊断\n"
+        "· 鼓励我 —— 一句话鼓励\n"
+        "· 日榜 / 周榜 / 月榜 —— 当日 / 本周 / 本月排行\n"
+        "· 详细数据 9月 —— 查任意时间段逐日明细\n"
         "· 删除打卡 —— 撤销最近一次截图打卡"
     ),
     "绑定": (
-        "🔗 绑定（每人独立账号）\n"
+        "🔗 绑定与设置（每人独立账号）\n"
         "━━━━━━━━━━━━\n"
         "· 绑定 coros —— 高驰：无需加好友，私聊收授权链接 → 回群发「绑定确认」\n"
         "· 绑定 garmin —— 佳明：无需加好友，私聊按提示回复「garmin绑定 邮箱 密码」\n"
         "· 其他平台 —— 无需绑定，直接发运动截图\n"
-        "· 我的绑定 / 解绑"
-    ),
-    "ai": (
-        "🤖 AI 助手\n"
-        "━━━━━━━━━━━━\n"
-        "· @我 + 问题 —— 运动 / 伤病 / 疲劳 / 天气等问答\n"
-        "· @我 + 一句话 —— 也能查数据（今天跑了多少 / 这周排行）\n"
-        "· 截图打卡 —— 记录成功后 AI 补一句鼓励"
+        "· 我的绑定 / 解绑\n"
+        "· 昵称 xxx —— 设置自己的显示昵称（昵称 清空 恢复）"
     ),
     "其它": (
         "🎲 其它\n"
         "━━━━━━━━━━━━\n"
         "· 抽奖 [N] 候选… / 骰子 / 随机数 —— 群互动\n"
-        "· 昵称 xxx —— 设置自己的显示昵称（昵称 清空 恢复）\n"
-        "· 机器状态 / 同步数据 —— 管理员\n"
-        "· 打卡记录 QQ / 删除打卡记录 QQ 记录号 —— 管理员删打卡"
+        "· 管理员命令 —— 管理员查看需权限才能执行的命令"
     ),
 }
 
@@ -77,23 +68,25 @@ _HELP_TOPIC_KEYS = {
         "步数",
         "周数据",
         "月数据",
-        "排行",
+        "近30天",
+        "日榜",
         "周榜",
         "月榜",
+        "排行",
+        "分析",
         "总结",
         "建议",
         "诊断",
         "鼓励",
         "删除打卡",
         "撤销打卡",
-        "数据",
+        "详细数据",
         "历史",
         "明细",
         "训练记录",
     ),
-    "绑定": ("绑定", "bind", "coros", "garmin", "佳明", "高驰", "解绑", "我的绑定"),
-    "ai": ("ai", "助手", "问答", "问题", "聊天", "人工智能"),
-    "其它": ("其它", "其他", "抽奖", "骰子", "随机", "管理", "机器状态", "同步", "昵称", "改名"),
+    "绑定": ("绑定", "bind", "coros", "garmin", "佳明", "高驰", "解绑", "我的绑定", "昵称", "改名"),
+    "其它": ("其它", "其他", "抽奖", "骰子", "随机", "管理", "机器状态", "同步", "管理员命令"),
 }
 
 
@@ -168,7 +161,8 @@ def _remember(qq: str, group_id, question: str, answer: str) -> None:
 
 # 自然语言查数据的强信号词：命中才走 LLM 意图分类，纯闲聊/问答直接跳过，省一次调用延迟。
 _QUERY_HINTS = re.compile(
-    r"今日|今天|步数|距离|排行|周榜|月榜|榜|总结|鼓励|建议|诊断|历史|数据|配速|消耗|爬升|心率|睡眠|跑了|跑量|运动了|公里"
+    r"今日|今天|步数|距离|排行|周榜|月榜|日榜|榜|总结|鼓励|建议|诊断|分析|历史|详细数据|明细|"
+    r"数据|配速|消耗|爬升|心率|睡眠|跑了|跑量|运动了|公里"
 )
 
 
@@ -194,12 +188,10 @@ async def _dispatch_query(event: GroupMessageEvent, question: str, bot=None) -> 
             return await build_period(qq, nickname, "周", "data")
         if kind == "monthly":
             return await build_period(qq, nickname, "月", "data")
-        if kind == "summary":
+        if kind in ("summary", "advise"):
+            # 「总结 / 建议 / 诊断」类自然语言统一汇入三合一的「分析」
             period = "月" if intent.get("period") == "month" else "周"
-            return await build_period(qq, nickname, period, "ai")
-        if kind == "advise":
-            period = "月" if intent.get("period") == "month" else "周"
-            return await build_period(qq, nickname, period, "advise")
+            return await build_analysis(qq, nickname, period)
         if kind == "encourage":
             period = "月" if intent.get("period") == "month" else "周"
             return await build_period(qq, nickname, period, "encourage")
@@ -208,9 +200,8 @@ async def _dispatch_query(event: GroupMessageEvent, question: str, bot=None) -> 
             if scope not in ("day", "week", "month"):
                 scope = "day"
             return await build_ranking(scope)
-        if kind == "data_range":
-            return await build_range(qq, nickname, intent.get("range", ""), False)
-        if kind == "history":
+        if kind in ("history", "data_range"):
+            # 任意时间段明细（「详细数据 9月」）；data_range 为旧意图名，兼容处理
             return await build_range(qq, nickname, intent.get("range", ""), True)
         if kind == "help":
             return HELP_OVERVIEW
@@ -247,10 +238,21 @@ async def handle_at(bot: Bot, event: MessageEvent):
     if text:
         await at_me.finish(text)
 
-    # 2) 多轮问答：带短期上下文（最近几轮），回答后记住本轮（按群隔离，避免串群）
+    # 2) 多轮问答：带短期上下文（最近几轮）+ 本人本周数据概览（只读聚合，让回答
+    # 能结合成员真实数据），回答后记住本轮（按群隔离，避免串群）。
     gid = getattr(event, "group_id", None)
     history = _chat_history(qq, gid)
-    text = await asyncio.to_thread(llm.answer_question, question, history)
+    context = ""
+    if _QUERY_HINTS.search(question):
+        # 数据相关的提问才带上下文：既省 DB 查询，也避免闲聊被无关数字干扰
+        try:
+            start, end, _ = summary.parse_range("本周")
+            s = await asyncio.to_thread(summary.compute_member_summary, qq, start, end)
+            if s["active_days"] > 0 or s["distance_km"] > 0:
+                context = llm.sport_facts_text(getattr(event.sender, "nickname", None) or qq, s)
+        except Exception as e:
+            logger.warning(f"构建成员数据上下文失败（不带上下文继续）: {e}")
+    text = await asyncio.to_thread(llm.answer_question, question, history, context)
     if text:
         _remember(qq, gid, question, text)
         await at_me.finish(text)

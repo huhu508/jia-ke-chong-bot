@@ -8,7 +8,7 @@ from nonebot.log import logger
 
 from ..services import ranking, sync, timeutil
 
-ranking_cmd = on_command("排行", aliases={"运动排行", "今日排行"}, priority=5, block=True)
+ranking_cmd = on_command("日榜", aliases={"排行", "今日排行", "运动排行"}, priority=5, block=True)
 weekly_cmd = on_command("周榜", aliases={"本周排行"}, priority=5, block=True)
 monthly_cmd = on_command("月榜", aliases={"本月排行"}, priority=5, block=True)
 
