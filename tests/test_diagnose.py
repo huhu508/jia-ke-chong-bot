@@ -1,17 +1,18 @@
-"""诊断科学计算测试：心率区间（Karvonen）、负荷状态（CTL/ATL/TSB）、历史成绩估算。"""
+"""诊断科学计算测试：心率区间（Karvonen）、负荷状态（CTL/ATL/TSB）、强度分布、诊断信号。"""
 
 from datetime import date, timedelta
 
-from app.models.checkin_log import CheckinLog
 from app.models.daily_record import DailyRecord
 from app.models.member import Member
 from app.services.diagnose import (
     compute_diagnosis,
     compute_load_status,
-    estimate_best_race,
+    daily_trimp,
+    diagnosis_signals,
     format_diagnosis,
     heart_rate_zones,
     hr_max_from_age,
+    intensity_distribution,
     zone_for_avg_hr,
 )
 
@@ -96,132 +97,6 @@ def test_load_status_insufficient_data(db_session):
     assert compute_load_status(db_session, "111", today=today) is None
 
 
-def test_estimate_best_race_5k_from_checkin(db_session):
-    today = date(2026, 10, 18)
-    # 最近一次 5km 用了 30 分钟（6:00/km）→ 估算 5k = 1800s
-    db_session.add(
-        CheckinLog(
-            member_qq="111",
-            record_date=today - timedelta(days=3),
-            distance_km=5.0,
-            active_minutes=30,
-        )
-    )
-    db_session.commit()
-    est = estimate_best_race(db_session, "111", today=today)
-    assert est == (5.0, 1800)
-
-
-def test_estimate_best_race_picks_fastest_and_10k_fallback(db_session):
-    today = date(2026, 10, 18)
-    # 两条 5k 窗口候选：25min/4.5km（5:33）更快，应胜出
-    db_session.add(
-        CheckinLog(
-            member_qq="111",
-            record_date=today - timedelta(days=5),
-            distance_km=5.0,
-            active_minutes=30,
-        )
-    )
-    db_session.add(
-        CheckinLog(
-            member_qq="111",
-            record_date=today - timedelta(days=2),
-            distance_km=4.5,
-            active_minutes=25,
-        )
-    )
-    db_session.commit()
-    est = estimate_best_race(db_session, "111", today=today)
-    assert est == (5.0, round(25 * 60 / 4.5 * 5))
-
-    # 只有 10k 窗口候选（平台单次运动日）→ 回退 10k 估算
-    db_session.add(
-        DailyRecord(
-            member_qq="222",
-            record_date=today - timedelta(days=1),
-            platform="coros",
-            distance_km=10.0,
-            avg_pace_sec_per_km=300.0,
-            activities_count=1,
-        )
-    )
-    db_session.commit()
-    est = estimate_best_race(db_session, "222", today=today)
-    assert est == (10.0, 3000)
-
-
-def test_estimate_best_race_confidence_gates(db_session):
-    today = date(2026, 10, 18)
-    # 置信度门槛：全部应被忽略 → None
-    # ① 多活动日（activities_count=2）的日均配速混合了不同强度，不可用
-    db_session.add(
-        DailyRecord(
-            member_qq="111",
-            record_date=today - timedelta(days=1),
-            platform="coros",
-            distance_km=6.0,
-            avg_pace_sec_per_km=280.0,
-            activities_count=2,
-        )
-    )
-    # ② 距离低于 5k 窗口下限（4.5km）的短冲配速失真
-    db_session.add(
-        CheckinLog(
-            member_qq="111",
-            record_date=today - timedelta(days=2),
-            distance_km=4.3,
-            active_minutes=18,
-        )
-    )
-    # ③ 超过 30 天窗口的旧成绩不代表当前状态
-    db_session.add(
-        CheckinLog(
-            member_qq="111",
-            record_date=today - timedelta(days=40),
-            distance_km=5.0,
-            active_minutes=20,
-        )
-    )
-    db_session.commit()
-    assert estimate_best_race(db_session, "111", today=today) is None
-
-    # 加上一条合格的 5k 窗口单次记录 → 立即有估算
-    db_session.add(
-        CheckinLog(
-            member_qq="111",
-            record_date=today - timedelta(days=1),
-            distance_km=5.0,
-            active_minutes=25,
-        )
-    )
-    db_session.commit()
-    assert estimate_best_race(db_session, "111", today=today) == (5.0, 1500)
-
-
-def test_estimate_best_race_ignores_out_of_window_and_dirty(db_session):
-    today = date(2026, 10, 18)
-    # 距离窗口外（3km）与配速不合理（1200s/km）的候选都应被忽略 → None
-    db_session.add(
-        CheckinLog(
-            member_qq="111",
-            record_date=today,
-            distance_km=3.0,
-            active_minutes=18,
-        )
-    )
-    db_session.add(
-        CheckinLog(
-            member_qq="111",
-            record_date=today - timedelta(days=1),
-            distance_km=5.0,
-            active_minutes=100,  # 20:00/km，超出合理配速上限
-        )
-    )
-    db_session.commit()
-    assert estimate_best_race(db_session, "111", today=today) is None
-
-
 def test_compute_diagnosis_hr_zones_needs_age_and_resting(db_session):
     today = date(2026, 10, 18)
     # 无年龄 → 不计算心率区间
@@ -268,13 +143,112 @@ def test_format_diagnosis_includes_new_sections(db_session):
         )
     db_session.commit()
 
-    # 自动估算的比赛成绩：输出须明确标注「非比赛成绩」
-    r = compute_diagnosis(db_session, "111", race=(5.0, 1500), race_estimated=True)
+    # 带比赛成绩：给出 VO₂max/成绩预测；强度分布（近7天全 Z2）判定极化结构良好
+    r = compute_diagnosis(db_session, "111", race=(5.0, 1500))
     text = format_diagnosis(r, "甲")
     assert "心率区间" in text and "Z2 有氧基础" in text
     assert "负荷状态" in text and "CTL" in text and "TSB" in text
-    assert "非比赛成绩" in text
+    assert "强度分布" in text and "极化" in text
+    assert "VO₂max" in text and "成绩预测" in text
 
-    # 未给成绩时给引导提示
+    # 裸分析（无成绩）：不含成绩预测，结尾引导补充 5k 最佳成绩
     r2 = compute_diagnosis(db_session, "111")
-    assert format_diagnosis(r2, "甲").count("心率区间") >= 1
+    text2 = format_diagnosis(r2, "甲")
+    assert "补充 5k" in text2
+    assert "🎯 有氧能力" not in text2
+
+
+def test_daily_trimp():
+    # TRIMP 随强度单调上升；ΔHR ≤ 0（平均心率不高于静息）时为 0
+    t1 = daily_trimp(30, 130, 60, 190)
+    t2 = daily_trimp(30, 150, 60, 190)
+    assert t2 > t1 > 0
+    assert daily_trimp(30, 60, 60, 190) == 0.0
+    assert daily_trimp(30, 140, 60, 60) == 0.0  # hr_max <= resting → 0
+
+
+def test_load_status_trimp_basis(db_session):
+    today = date(2026, 10, 18)
+    start = today - timedelta(days=59)
+    db_session.add(Member(qq="111", nickname="甲", platform="coros", age=30))
+    for i in range(60):
+        db_session.add(
+            DailyRecord(
+                member_qq="111",
+                record_date=start + timedelta(days=i),
+                platform="coros",
+                distance_km=8.0,
+                active_minutes=40,
+                avg_hr=150,
+                resting_hr=60,
+            )
+        )
+    db_session.commit()
+    # 全部活跃日都有 HR 数据 + 年龄 → TRIMP 基线；恒定负荷 → CTL≈ATL、TSB≈0
+    ls = compute_load_status(db_session, "111", today=today)
+    assert ls is not None and ls["basis"] == "trimp"
+    assert ls["ctl"] > 0 and abs(ls["ratio"]) < 0.1
+
+
+def test_load_status_km_basis_without_hr(db_session):
+    today = date(2026, 10, 18)
+    start = today - timedelta(days=29)
+    db_session.add(Member(qq="111", nickname="甲", platform="", age=30))
+    for i in range(30):
+        db_session.add(
+            DailyRecord(
+                member_qq="111",
+                record_date=start + timedelta(days=i),
+                platform="manual",
+                distance_km=5.0,
+            )
+        )
+    db_session.commit()
+    # 有年龄但无 HR 数据 → 退回跑量基线
+    ls = compute_load_status(db_session, "111", today=today)
+    assert ls is not None and ls["basis"] == "km"
+
+
+def test_intensity_distribution_gray_zone():
+    today = date(2026, 10, 18)
+
+    # 年龄 30 静息 60：Z3 = 151~164，Z2 = 136~149
+    def _rec(hr, i):
+        return DailyRecord(
+            member_qq="111",
+            record_date=today - timedelta(days=i),
+            platform="manual",
+            distance_km=5.0,
+            avg_hr=hr,
+        )
+
+    # 4 天全在 Z3 → 灰色地带判定
+    records = [_rec(155, i) for i in range(4)]
+    d = intensity_distribution(records, 30, 60)
+    assert d is not None and "中等强度" in d["verdict"]
+
+    # 5 天 Z2 + 1 天 Z4 → 接近极化模型
+    records = [_rec(140, i) for i in range(5)] + [_rec(170, 6)]
+    d = intensity_distribution(records, 30, 60)
+    assert d is not None and "极化" in d["verdict"]
+
+    # 有效天数不足 3 → None
+    assert intensity_distribution(records[:2], 30, 60) is None
+
+
+def test_diagnosis_signals_nonempty():
+    result = {
+        "acwr": 1.1,
+        "acwr_verdict": ("合理", "负荷平稳"),
+        "load_status": {"basis": "km", "verdict": "正常训练状态，保持当前节奏"},
+        "intensity": {"summary": "Z2 ×5、Z4 ×1", "verdict": "接近极化模型"},
+        "recovery": {"sleep_avg": 7.2, "resting_hr_delta": 1},
+        "pace_trend": {"delta": -12},
+    }
+    text = diagnosis_signals(result)
+    assert "ACWR" in text and "负荷状态" in text and "强度分布" in text
+    assert "睡眠" in text and "配速趋势" in text
+
+
+def test_diagnosis_signals_empty_ok():
+    assert diagnosis_signals({}) == ""

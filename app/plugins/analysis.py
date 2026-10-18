@@ -63,18 +63,26 @@ def _template_summary(name: str, period: str, s: dict) -> str:
     return "，".join(parts) + "。" + tail
 
 
-def _template_advise(name: str, period: str, s: dict) -> str:
-    """LLM 不可用时的确定性兜底建议（按周/月跑量分档）。"""
+def _template_advise(name: str, period: str, s: dict, signals: dict | None = None) -> str:
+    """LLM 不可用时的确定性兜底建议：优先结合诊断信号（负荷状态/加量速度/强度分布），
+    否则按周/月跑量分档。"""
     km = s["distance_km"]
     parts = [f"{name} {period}跑了 {km} km（运动 {s['active_days']} 天）"]
-    if km >= 40:
+    ls = (signals or {}).get("load_status")
+    acwr = (signals or {}).get("acwr_verdict")
+    intens = (signals or {}).get("intensity")
+    if ls and "明显疲劳" in ls["verdict"]:
+        parts.append("当前负荷状态明显疲劳，建议先减量恢复几天，再谈强度")
+    elif acwr and acwr[0] in ("略偏高", "偏高"):
+        parts.append("加量速度偏快，接下来 1~2 周控制在 +10% 以内，并多留恢复日")
+    elif intens and "中等强度" in intens["verdict"]:
+        parts.append("中等强度占比偏高，多安排轻松跑打底、把强度留给少数高质量课")
+    elif km >= 40:
         parts.append("训练量已经不小，注意安排轻松日和充分恢复，避免过度训练")
     elif km >= 15:
         parts.append("量保持得不错，可以每周穿插一次间歇或爬坡来提强度")
     else:
         parts.append("建议稳步加量，每周增幅控制在 10% 以内，先规律再进阶")
-    if s.get("training_load") and s["training_load"] >= 600:
-        parts.append("负荷偏高，留意睡眠与疲劳感，必要时减量")
     return "，".join(parts) + "。"
 
 
@@ -91,9 +99,9 @@ async def build_analysis(qq: str, nickname: str, kind: str, race_text: str = "")
     """构建「分析」结果文本（命令 handler 与自然语言路由共用）。
 
     kind: ``周``/``月``；race_text 为可选比赛成绩原文（如「5k 25:00」）。
-    三合一输出：数据摘要 → AI 总结（失败降级模板）→ 训练建议（失败降级模板）→
-    确定性诊断（含心率区间/负荷状态；未给比赛成绩时自动用历史最快配速估算，
-    并明确标注「非比赛成绩」）。
+    三合一输出：数据摘要 → AI 总结（失败降级模板）→ 训练建议（结合诊断信号，
+    失败降级信号驱动的模板）→ 确定性诊断（心率区间/强度分布/负荷状态；
+    **只有提供比赛成绩才计算成绩预测与训练配速**，裸「分析」结尾引导补成绩）。
     """
     name, period, span, s, bound = await _gather_qq(qq, nickname, kind)
 
@@ -106,14 +114,7 @@ async def build_analysis(qq: str, nickname: str, kind: str, race_text: str = "")
 
     session = get_session()
     try:
-        # 减少输入摩擦：未给比赛成绩时，自动从历史记录挑「最快单次 5k/10k」配速估算
-        # （展示层会明确标注「基于历史记录的估算，非比赛成绩」）
-        race_estimated = False
-        if race is None:
-            est = diagnose.estimate_best_race(session, qq)
-            if est is not None:
-                race, race_estimated = est, True
-        result = diagnose.compute_diagnosis(session, qq, race, race_estimated=race_estimated)
+        result = diagnose.compute_diagnosis(session, qq, race)
     finally:
         session.close()
 
@@ -133,15 +134,16 @@ async def build_analysis(qq: str, nickname: str, kind: str, race_text: str = "")
     lines.append("📊 数据")
     lines.extend(stats.splitlines()[1:])
 
-    # AI 总结与训练建议：并行请求，失败各自降级模板
+    # AI 总结与训练建议：并行请求，失败各自降级；建议带诊断信号 grounding
+    signals_text = diagnose.diagnosis_signals(result)
     ai_text, advise_text = await asyncio.gather(
         asyncio.to_thread(llm.summarize_sport, name, period, s),
-        asyncio.to_thread(llm.advise, name, period, s),
+        asyncio.to_thread(llm.advise, name, period, s, signals_text),
     )
     lines.append("\n📝 总结")
     lines.append(ai_text or _template_summary(name, period, s))
     lines.append("\n💪 建议")
-    lines.append(advise_text or _template_advise(name, period, s))
+    lines.append(advise_text or _template_advise(name, period, s, result))
 
     # 确定性诊断（数据可支撑时始终给出；带比赛成绩则解锁 VO₂max/成绩预测）
     if result["records"] > 0 or race is not None:
