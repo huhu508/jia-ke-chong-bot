@@ -21,10 +21,16 @@
 - CTL/ATL/TSB：Banister 冲量-响应模型的简化应用（TrainingPeaks 等采用的
   EWMA 负荷追踪），CTL 时间常数 42 天、ATL 7 天、TSB = CTL − ATL；
   本实现以**日跑量**作为负荷输入（不含强度信息，结论只作趋势参考）。
+- EWMA 负荷比：Williams 等（2017），用 7 天 / 28 天 EWMA 之比替代滚动均值，
+  对「练休分布」不敏感，与滚动 ACWR 互为交叉验证（两者背离即提示近期负荷突变）。
+- 单调性 / 训练应变：Foster（1998），
+  单调性 = 7 天日负荷均值 / 标准差，训练应变 = 7 天负荷总量 × 单调性；
+  单调性高表示「每天负荷过于平均、缺乏起伏」，是过度训练的风险提示之一。
 """
 
 import math
 import re
+import statistics
 from datetime import timedelta
 
 from sqlalchemy import select
@@ -193,6 +199,19 @@ def _acwr_level(acwr: float) -> tuple[str, str]:
     return "偏高", "近期加量过猛，建议适当减量或增加恢复，降低受伤风险。"
 
 
+def _monotony_level(monotony: float) -> tuple[str, str]:
+    """把 Foster 单调性映射成（等级, 说明）。阈值取自 Foster（1998）的经验区间。
+
+    单调性 = 7 天日负荷均值 / 标准差。数值越高表示每天负荷越平均、越缺起伏；
+    长期 >2.0 常被视为过度训练的风险信号（配合训练应变一起看）。
+    """
+    if monotony < 1.5:
+        return "波动健康", "日负荷有高有低，恢复日与训练日区分明显"
+    if monotony <= 2.0:
+        return "略偏平", "日负荷变化偏小，建议明确区分轻松日与质量日"
+    return "过于单调", "日负荷过于平均、缺乏起伏，是过度训练的风险提示之一"
+
+
 # ---------------------------------------------------------------------------
 # 心率区间（Karvonen 储备心率法）
 # ---------------------------------------------------------------------------
@@ -255,6 +274,7 @@ def zone_for_avg_hr(zones: list, avg_hr: int) -> tuple[int, str]:
 
 _CTL_DAYS = 42  # 慢性负荷时间常数（天）
 _ATL_DAYS = 7  # 急性负荷时间常数（天）
+_EWMA_CHRONIC_DAYS = 28  # EWMA-ACWR 的慢性窗口（Williams 2017 采用 28 天）
 _LOAD_HISTORY_DAYS = 60  # 回看窗口（覆盖 CTL 时间常数后仍有余量）
 # TRIMP 基线的数据覆盖率门槛：有 HR 数据的活跃日占比 ≥80% 才用 TRIMP（含强度信息），
 # 否则退回跑量基线（缺强度信息、但口径一致）。
@@ -346,6 +366,20 @@ def compute_load_status(session: Session, qq: str, today=None) -> dict | None:
     tsb = ctl - atl
     ratio = tsb / ctl if ctl > 0 else 0.0
 
+    # 近 7 天单调性 / 训练应变（Foster 1998）：衡量负荷波动是否健康。
+    # 标准差为 0（每天负荷完全相同）时单调性无定义 → 置 None，由展示层跳过。
+    last7 = series[-_ATL_DAYS:]
+    mean7 = sum(last7) / len(last7)
+    sd7 = statistics.pstdev(last7)
+    weekly_load = sum(last7)
+    monotony = round(mean7 / sd7, 2) if sd7 > 0 else None
+    strain = round(weekly_load * monotony, 1) if monotony is not None else None
+
+    # EWMA 版急慢性负荷比（Williams 2017）：7 天 / 28 天 EWMA 之比。
+    # 与滚动 ACWR 互为交叉验证——两者明显背离说明最近几天负荷发生了突变。
+    ewma28 = _ewma(series, _EWMA_CHRONIC_DAYS)
+    ewma_acwr = round(atl / ewma28, 2) if ewma28 > 0 else None
+
     if ratio >= 0.15:
         verdict = "状态新鲜，适合上强度（负荷已被消化，是安排高质量训练或比赛的好时机）"
     elif ratio >= 0.05:
@@ -365,6 +399,9 @@ def compute_load_status(session: Session, qq: str, today=None) -> dict | None:
         "verdict": verdict,
         "days": active_days,
         "basis": basis,
+        "monotony": monotony,
+        "strain": strain,
+        "ewma_acwr": ewma_acwr,
     }
 
 
@@ -436,6 +473,11 @@ def diagnosis_signals(result: dict) -> str:
         parts.append(
             f"负荷状态（{'TRIMP' if ls['basis'] == 'trimp' else '跑量'}）：{ls['verdict']}"
         )
+        if ls.get("monotony") is not None:
+            level, _ = _monotony_level(ls["monotony"])
+            parts.append(f"负荷单调性 {ls['monotony']}（{level}）")
+        if ls.get("ewma_acwr") is not None:
+            parts.append(f"EWMA 负荷比 {ls['ewma_acwr']}")
     if result.get("intensity"):
         parts.append(
             f"近7天强度分布 {result['intensity']['summary']}（{result['intensity']['verdict']}）"
@@ -645,6 +687,26 @@ def format_diagnosis(result: dict, name: str) -> str:
             tsb_str = f"+{ls['tsb']}" if ls["tsb"] >= 0 else str(ls["tsb"])
             lines.append(f"· TSB = {tsb_str} km —— {ls['verdict']}")
             lines.append("·（跑量负荷不含强度信息，阈值是经验参考区间，仅作趋势提示）")
+
+        # 单调性 / 训练应变（Foster 1998）+ EWMA 负荷比（Williams 2017）
+        mono = ls.get("monotony")
+        if mono is not None:
+            level, note = _monotony_level(mono)
+            line = f"· 单调性 {mono}（{level}）：{note}"
+            if ls.get("strain") is not None:
+                line += f"；训练应变 ≈ {ls['strain']}"
+            lines.append(line)
+        ew = ls.get("ewma_acwr")
+        if ew is not None and result["acwr"] is not None:
+            diff = ew - result["acwr"]
+            if abs(diff) < 0.15:
+                tag = "与滚动 ACWR 基本一致"
+            elif diff > 0:
+                tag = "高于滚动 ACWR，说明最近几天负荷在集中上升"
+            else:
+                tag = "低于滚动 ACWR，说明最近几天负荷在回落"
+            lines.append(f"· EWMA 负荷比（7/28 天）{ew} {tag}")
+        lines.append("·（单调性/训练应变：Foster 1998；EWMA 负荷比：Williams 2017，均仅作参考）")
 
     # 恢复信号
     rec = result["recovery"]

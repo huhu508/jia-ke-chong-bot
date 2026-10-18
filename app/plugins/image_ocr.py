@@ -308,12 +308,9 @@ async def handle_image(bot: Bot, event: MessageEvent):
     # 不是单次运动详情，不应作为一次运动回显/落库。先分析再确认，避免误读。
     page_kind = parsers.detect_page_kind(text)
     if page_kind == "summary":
-        logger.info(f"[图片识别] qq={qq} 识别为统计/列表页，拒绝记录")
-        await image_matcher.finish(
-            "🔍 我识别出这是一张「统计/列表」页（多条运动的汇总），不是单次运动详情，所以先不记录。\n"
-            "· 若要记录某一次运动：点开那条记录，发**单次运动详情页**截图（含这一次的距离/时长/配速）；\n"
-            "· 若要查自己的周/月汇总：直接发「周数据」「月数据」，我会按平台接口自动统计。"
-        )
+        # 统计/列表页一律静默跳过（同「非运动图」口径：不回复任何消息，只记日志）
+        logger.info(f"[图片识别] qq={qq} 识别为统计/列表页，静默跳过")
+        return
 
     # 可疑图补一次视觉兜底：OCR 读出了距离但数值可疑（如 5.20 km 被读成 52.0 km →
     # 距离/时长推出的速度明显超限；或每公里消耗离谱），说明识别质量存疑。此时若本次
@@ -349,11 +346,9 @@ async def handle_image(bot: Bot, event: MessageEvent):
     # 超范围的夸张跑量直接拒绝，避免污染排行与累计里程（这是 detect_page_kind 之外的最后防线）。
     data, reject_reason = parsers.sanitize_activity(data)
     if reject_reason:
-        logger.info(f"[图片识别] qq={qq} 数据不合理，拒绝记录: {reject_reason}")
-        await image_matcher.finish(
-            f"⚠️ {reject_reason}，本次未记录。\n"
-            "若是单次运动详情，请重发一张更清晰的截图；若是多天汇总，直接发「周数据 / 月数据」查看。"
-        )
+        # 数据不合理（多为非运动图误读）同样静默跳过：不回复任何消息，只记日志
+        logger.info(f"[图片识别] qq={qq} 数据不合理，静默跳过: {reject_reason}")
+        return
 
     if not any(
         k in data
@@ -368,19 +363,10 @@ async def handle_image(bot: Bot, event: MessageEvent):
             "avg_hr",
         )
     ):
-        # 读不出运动字段时的交互分级：
-        #   - 已绑定成员：截图本就不记录（数据以 App 为准），静默跳过；
-        #   - OCR 零文字且视觉也无果（纯照片/风景大图）：静默，避免对群内大图产生噪音；
-        #   - 其余（OCR 有文字但读不出运动字段）：回复引导，不再让用户「发了图没反应」。
-        if bound or (not result and not vision_data):
-            logger.info(f"[图片识别] qq={qq} 未识别出运动数据，静默跳过")
-            return
-        logger.info(f"[图片识别] qq={qq} 未识别出运动数据，回复引导")
-        await image_matcher.finish(
-            "🔍 没认出这张图里的运动数据…\n"
-            "· 记录单次运动：请发**单次运动详情页**截图（含这一次的距离/时长/配速）；\n"
-            "· 查汇总数据：直接发「周数据」「月数据」，我会按平台接口自动统计。"
-        )
+        # 不是运动数据截图（照片/表情之外的其它图、OCR 读不出任何运动字段）：
+        # 一律静默跳过，不回复任何消息——避免对群内非运动图产生噪音。
+        logger.info(f"[图片识别] qq={qq} 未识别出运动数据，静默跳过")
+        return
 
     # 已绑定平台 → 只展示不写库（数据已由平台接口自动同步）；
     # 未绑定平台 → 累加累计里程 + 写当日明细（供排行，含爬升/配速等）。
