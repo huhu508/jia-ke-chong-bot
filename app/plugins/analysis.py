@@ -18,7 +18,7 @@ from nonebot.log import logger
 from nonebot.params import CommandArg
 
 from ..db import get_session
-from ..services import diagnose, llm, prescription
+from ..services import diagnose, llm
 from .admin import _send_private_robust
 from .summary import _format_summary, _gather_qq
 
@@ -38,10 +38,6 @@ analyze_cmd = on_command(
     },
     priority=5,
     block=True,
-)
-
-prescription_cmd = on_command(
-    "处方", aliases={"训练处方", "下周训练", "下周安排"}, priority=5, block=True
 )
 
 _RACE_USAGE = (
@@ -183,44 +179,3 @@ async def handle_analyze(bot: Bot, event: MessageEvent, args: Message = CommandA
             )
         logger.warning(f"分析结果私发失败（qq={event.get_user_id()}），退回群内展示")
     await analyze_cmd.finish(text)
-
-
-async def build_prescription(qq: str, nickname: str) -> str:
-    """构建「下周训练处方」文本。
-
-    数据来自确定性汇总/诊断；模型给出的 JSON 建议必须通过 prescription 的本地校验
-    （次数、类型白名单、跑量总量、配速区间），不合格或模型不可用时回落到规则模板——
-    模型始终不接触数据链路，只提供「可被程序消费的建议」。
-    """
-    name, period, span, s, bound = await _gather_qq(qq, nickname, "周")
-    if s["active_days"] == 0 and s["distance_km"] <= 0:
-        return _no_data_hint()
-
-    session = get_session()
-    try:
-        result = diagnose.compute_diagnosis(session, qq, None)
-    finally:
-        session.close()
-
-    base_km = float(result.get("acute") or 0.0)
-    signals_text = diagnose.diagnosis_signals(result)
-    raw = await asyncio.to_thread(llm.training_prescription, name, s, signals_text)
-    presc, reason = prescription.parse_and_validate(raw, base_km)
-    if presc is None:
-        logger.info(f"训练处方未采用模型结果（{reason}），改用规则模板")
-        presc = prescription.template_prescription(result, base_km)
-    return prescription.render(presc, name)
-
-
-@prescription_cmd.handle()
-async def handle_prescription(bot: Bot, event: MessageEvent):
-    try:
-        text = await build_prescription(
-            event.get_user_id(), getattr(event.sender, "nickname", None)
-        )
-        await prescription_cmd.finish(text)
-    except (FinishedException, ActionFailed):
-        raise
-    except Exception as e:
-        logger.exception(f"生成训练处方失败: {e}")
-        await prescription_cmd.finish(f"生成训练处方失败：{e}")

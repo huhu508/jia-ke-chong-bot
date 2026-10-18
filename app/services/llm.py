@@ -522,39 +522,6 @@ def _parse_json_obj(content: str) -> dict | None:
     return data if isinstance(data, dict) else None
 
 
-def training_prescription(name: str, s: dict, signals: str = "") -> dict | None:
-    """让模型输出**结构化**的「下周训练处方」；失败返回 None（调用方回落规则模板）。
-
-    与其它任务的本质区别：这里模型的产出会被**程序消费**（而非直接展示）——
-    输出必须通过 ``prescription.parse_and_validate`` 的白名单、次数、总量、配速校验
-    才会被渲染，不通过就整体丢弃。这样模型只负责「把数据翻译成可执行安排」，
-    判断这份安排是否靠谱仍然由确定性代码完成。
-    """
-    system_prompt = _system(
-        "根据用户的近期训练数据，给出一份下周训练处方。只输出一个 JSON 对象，不要任何多余文字。"
-        '格式：{"focus":"一句话本周重点","sessions":[{"kind":"轻松跑","distance_km":6,'
-        '"pace_sec_per_km":390,"purpose":"一句话目的"}],"caution":"一句话提醒"}。'
-        "约束：sessions 2~5 条；kind 只能是 轻松跑/节奏跑/间歇跑/长距离/交叉训练/休息；"
-        "distance_km 单位公里（休息可写 0 或省略）；pace_sec_per_km 是每公里配速换算成秒"
-        "（5:30 写 330，4:05 写 245），休息可省略；一周总距离不要超过给出的近 7 天跑量的 1.3 倍；"
-        "不要编造未给出的数据；只给安排，不要解释。"
-    )
-    user_text = _sport_facts(name, s)
-    if signals:
-        user_text += f"。诊断信号：{signals}"
-    content = _call(
-        [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_text},
-        ],
-        max_tokens=600,
-        temperature=0.3,
-    )
-    if content is None:
-        return None
-    return _parse_json_obj(content)
-
-
 def classify_intent(text: str) -> dict | None:
     """自然语言查询意图分类，供 @机器人 把自然语言路由到已有命令；失败返回 None（降级纯问答）。
 
